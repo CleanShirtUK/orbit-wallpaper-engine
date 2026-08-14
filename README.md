@@ -50,6 +50,10 @@ also writes `hyprlock-background.conf` beside its snapshots. The colour is
 derived from the transformed wallpaper surface colour and is safe to include
 from a Hyprlock configuration.
 
+The companion session-effects service uses this mode during login so it can
+wait for Noctalia before triggering the single startup intro. Manual intro
+requests through the control FIFO are unaffected.
+
 ## Resource governor
 
 The renderer samples AMD's `gpu_busy_percent` value and `/proc/loadavg` twice
