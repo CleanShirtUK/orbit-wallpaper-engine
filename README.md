@@ -27,11 +27,11 @@ desktop wallpaper is disabled in its state settings, while its greeter paths
 point at the generated PNG snapshots.
 
 The service is managed by the companion dotfiles repository. Build the project
-with `make`, then enable the service with:
+with `make`; Hyprland starts it after importing the current Wayland session
+environment:
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now ps3-wave-wallpaper.service
+make
 ```
 
 The renderer expects `HOME` to be set and requires a running Hyprland session.
@@ -46,12 +46,15 @@ printf 'exit\n' > ~/.cache/ps3-wave-wallpaper/control  # exit to black
 ```
 
 Set `PS3_WAVE_SKIP_INTRO=1` to start at normal animation speed. The renderer
+can instead start fully hidden with `PS3_WAVE_START_HIDDEN=1` and remain hidden
+until an explicit `intro` request arrives. The renderer
 also writes `hyprlock-background.conf` beside its snapshots. The colour is
 derived from the transformed wallpaper surface colour and is safe to include
 from a Hyprlock configuration.
 
-The companion session-effects service uses this mode during login so it can
-wait for Noctalia before triggering the single startup intro. Manual intro
+The installed dotfiles service sets `PS3_WAVE_START_HIDDEN=1` so the wallpaper
+does not paint during session startup. The companion session-effects service
+waits for Noctalia before triggering the single startup intro. Manual intro
 requests through the control FIFO are unaffected.
 
 Explicit `intro` and `exit` requests also thaw the resource governor so session

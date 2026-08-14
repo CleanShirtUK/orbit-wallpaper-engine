@@ -653,8 +653,13 @@ int main(int argc, char **argv) {
     app.surface = glGetUniformLocation(app.program, "u_surface");
     app.error = glGetUniformLocation(app.program, "u_error");
     read_palette(&app);
-    enum animation_mode animation = getenv("PS3_WAVE_SKIP_INTRO")
-        ? ANIMATION_NORMAL : ANIMATION_INTRO;
+    enum animation_mode animation;
+    if (getenv("PS3_WAVE_START_HIDDEN")) {
+        animation = ANIMATION_HIDDEN;
+    } else {
+        animation = getenv("PS3_WAVE_SKIP_INTRO")
+            ? ANIMATION_NORMAL : ANIMATION_INTRO;
+    }
     double animation_started = monotonic_seconds();
     double motion_time = 0.0;
     double last_frame = animation_started;
