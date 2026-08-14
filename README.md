@@ -36,6 +36,20 @@ systemctl --user enable --now ps3-wave-wallpaper.service
 
 The renderer expects `HOME` to be set and requires a running Hyprland session.
 
+The renderer starts with a four-and-a-half-second intro animation. It can be
+triggered again or sent into its one-second exit animation without restarting
+the process:
+
+```sh
+printf 'intro\n' > ~/.cache/ps3-wave-wallpaper/control # intro
+printf 'exit\n' > ~/.cache/ps3-wave-wallpaper/control  # exit to black
+```
+
+Set `PS3_WAVE_SKIP_INTRO=1` to start at normal animation speed. The renderer
+also writes `hyprlock-background.conf` beside its snapshots. The colour is
+derived from the transformed wallpaper surface colour and is safe to include
+from a Hyprlock configuration.
+
 ## Resource governor
 
 The renderer samples AMD's `gpu_busy_percent` value and `/proc/loadavg` twice

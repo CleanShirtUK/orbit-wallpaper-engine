@@ -3,6 +3,8 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2platform.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <png.h>
 #include <signal.h>
@@ -22,6 +24,8 @@
 #define MAX_OUTPUTS 16
 #define DEFAULT_PALETTE_RELATIVE ".config/hypr/noctalia.lua"
 #define DEFAULT_SNAPSHOT_RELATIVE ".cache/ps3-wave-wallpaper"
+#define DEFAULT_BACKGROUND_RELATIVE ".cache/ps3-wave-wallpaper/hyprlock-background.conf"
+#define DEFAULT_CONTROL_RELATIVE ".cache/ps3-wave-wallpaper/control"
 #define GPU_PRESSURE_ENTER 75.0
 #define GPU_PRESSURE_EXIT 45.0
 #define CPU_PRESSURE_ENTER 0.90
@@ -59,6 +63,7 @@ struct app {
     EGLConfig egl_config;
     GLuint program;
     GLint resolution, origin, canvas, time_uniform;
+    GLint brightness, visibility;
     GLint primary, secondary, surface, error;
     struct color colors[4];
     struct color target_colors[4];
@@ -75,7 +80,12 @@ struct app {
     bool gpu_path_checked;
     char palette_path[PATH_MAX];
     char snapshot_dir[PATH_MAX];
+    char background_path[PATH_MAX];
+    char control_path[PATH_MAX];
+    int control_fd;
 };
+
+enum animation_mode { ANIMATION_NORMAL, ANIMATION_INTRO, ANIMATION_EXIT, ANIMATION_HIDDEN };
 
 static volatile sig_atomic_t running = 1;
 
@@ -162,6 +172,60 @@ static struct color hex_color(const char *value) {
     };
 }
 
+static struct color wallpaper_base_color(struct color surface) {
+    float luminance = surface.r * 0.2126f + surface.g * 0.7152f + surface.b * 0.0722f;
+    struct color rich = {
+        luminance + (surface.r - luminance) * 1.18f,
+        luminance + (surface.g - luminance) * 1.18f,
+        luminance + (surface.b - luminance) * 1.18f,
+    };
+    return (struct color){
+        fmaxf(rich.r * 0.2f, 0.003f),
+        fmaxf(rich.g * 0.2f, 0.003f),
+        fmaxf(rich.b * 0.2f, 0.003f),
+    };
+}
+
+static bool write_background_color(struct app *app) {
+    if (!app->background_path[0]) return true;
+    struct color color = wallpaper_base_color(app->target_colors[2]);
+    char temporary_path[PATH_MAX];
+    snprintf(temporary_path, sizeof(temporary_path), "%s.tmp.XXXXXX", app->background_path);
+    int descriptor = mkstemp(temporary_path);
+    if (descriptor < 0) return false;
+    FILE *file = fdopen(descriptor, "w");
+    if (!file) {
+        close(descriptor);
+        unlink(temporary_path);
+        return false;
+    }
+    fprintf(file, "background {\n    monitor =\n    color = rgb(%02x%02x%02x)\n}\n",
+            (unsigned int)lroundf(color.r * 255.0f),
+            (unsigned int)lroundf(color.g * 255.0f),
+            (unsigned int)lroundf(color.b * 255.0f));
+    if (fclose(file) != 0 || rename(temporary_path, app->background_path) != 0) {
+        unlink(temporary_path);
+        return false;
+    }
+    return true;
+}
+
+static bool open_control(struct app *app) {
+    if (mkfifo(app->control_path, 0600) != 0 && errno != EEXIST) return false;
+    app->control_fd = open(app->control_path, O_RDWR | O_NONBLOCK);
+    return app->control_fd >= 0;
+}
+
+static int read_animation_request(struct app *app) {
+    char commands[64];
+    ssize_t length = read(app->control_fd, commands, sizeof(commands) - 1);
+    if (length <= 0) return 0;
+    commands[length] = '\0';
+    if (strstr(commands, "intro")) return 1;
+    if (strstr(commands, "exit")) return 2;
+    return 0;
+}
+
 static bool read_palette(struct app *app) {
     struct stat file_stat;
     if (stat(app->palette_path, &file_stat) != 0 || file_stat.st_mtime == app->palette_mtime) {
@@ -185,6 +249,7 @@ static bool read_palette(struct app *app) {
         if (quote) app->target_colors[i] = hex_color(quote + 1);
     }
     app->palette_mtime = file_stat.st_mtime;
+    write_background_color(app);
     app->snapshot_dirty = app->capture_snapshots;
     return true;
 }
@@ -464,7 +529,8 @@ static void set_vec3(GLint location, struct color color) {
     glUniform3f(location, color.r, color.g, color.b);
 }
 
-static void render(struct app *app, float seconds, bool capture_snapshot) {
+static void render(struct app *app, float seconds, float brightness, float visibility,
+                   bool capture_snapshot) {
     static const GLfloat triangle[] = {-1, -1, 3, -1, -1, 3};
     bool snapshots_saved = true;
     for (size_t i = 0; i < app->output_count; i++) {
@@ -475,6 +541,8 @@ static void render(struct app *app, float seconds, bool capture_snapshot) {
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, triangle);
         glUniform1f(app->time_uniform, seconds);
+        glUniform1f(app->brightness, brightness);
+        glUniform1f(app->visibility, visibility);
         glUniform2f(app->canvas, (float)(app->max_x - app->min_x), (float)(app->max_y - app->min_y));
         glViewport(0, 0, item->width, item->height);
         glUniform2f(app->resolution, (float)item->width, (float)item->height);
@@ -521,8 +589,33 @@ int main(int argc, char **argv) {
     app.debug_frames = getenv("PS3_WAVE_DEBUG_FRAMES") != NULL;
     snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
     snprintf(app.snapshot_dir, sizeof(app.snapshot_dir), "%s/%s", home, DEFAULT_SNAPSHOT_RELATIVE);
+    const char *background_path = getenv("PS3_WAVE_BACKGROUND_FILE");
+    if (background_path && *background_path) {
+        snprintf(app.background_path, sizeof(app.background_path), "%s", background_path);
+    } else {
+        snprintf(app.background_path, sizeof(app.background_path), "%s/%s", home, DEFAULT_BACKGROUND_RELATIVE);
+    }
+    const char *control_path = getenv("PS3_WAVE_CONTROL_FILE");
+    if (control_path && *control_path) {
+        snprintf(app.control_path, sizeof(app.control_path), "%s", control_path);
+    } else {
+        snprintf(app.control_path, sizeof(app.control_path), "%s/%s", home, DEFAULT_CONTROL_RELATIVE);
+    }
+    char *background_directory = strdup(app.background_path);
+    if (background_directory) {
+        char *separator = strrchr(background_directory, '/');
+        if (separator) {
+            *separator = '\0';
+            mkdir(background_directory, 0755);
+        }
+        free(background_directory);
+    }
     if (app.capture_snapshots && mkdir(app.snapshot_dir, 0755) != 0 && access(app.snapshot_dir, F_OK) != 0) {
         fprintf(stderr, "cannot create snapshot directory: %s\n", app.snapshot_dir);
+        return 1;
+    }
+    if (!open_control(&app)) {
+        fprintf(stderr, "cannot open animation control: %s\n", app.control_path);
         return 1;
     }
 
@@ -549,13 +642,18 @@ int main(int argc, char **argv) {
     app.origin = glGetUniformLocation(app.program, "u_origin");
     app.canvas = glGetUniformLocation(app.program, "u_canvas");
     app.time_uniform = glGetUniformLocation(app.program, "u_time");
+    app.brightness = glGetUniformLocation(app.program, "u_brightness");
+    app.visibility = glGetUniformLocation(app.program, "u_visibility");
     app.primary = glGetUniformLocation(app.program, "u_primary");
     app.secondary = glGetUniformLocation(app.program, "u_secondary");
     app.surface = glGetUniformLocation(app.program, "u_surface");
     app.error = glGetUniformLocation(app.program, "u_error");
     read_palette(&app);
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
+    enum animation_mode animation = getenv("PS3_WAVE_SKIP_INTRO")
+        ? ANIMATION_NORMAL : ANIMATION_INTRO;
+    double animation_started = monotonic_seconds();
+    double motion_time = 0.0;
+    double last_frame = animation_started;
     double last_palette = monotonic_seconds();
     float last_debug_snapshot = -1.0f;
     double last_pressure_sample = -1.0;
@@ -566,7 +664,69 @@ int main(int argc, char **argv) {
         wl_display_dispatch_pending(app.display);
         wl_display_flush(app.display);
         double now = monotonic_seconds();
-        float elapsed = (float)(now - ((double)start.tv_sec + (double)start.tv_nsec / 1e9));
+        double frame_delta = now - last_frame;
+        if (frame_delta < 0.0 || frame_delta > 0.25) frame_delta = 0.0;
+        last_frame = now;
+
+        int animation_request = read_animation_request(&app);
+        if (animation_request == 1) {
+            animation = ANIMATION_INTRO;
+            animation_started = now;
+            motion_time = 0.0;
+            animation_request = 0;
+        } else if (animation_request == 2) {
+            animation = ANIMATION_EXIT;
+            animation_started = now;
+            animation_request = 0;
+        }
+
+        float brightness_value = 1.0f;
+        float visibility_value = 1.0f;
+        float speed = 1.0f;
+        double animation_progress = now - animation_started;
+        if (animation == ANIMATION_INTRO) {
+            float progress = (float)(animation_progress / 4.5);
+            if (progress >= 1.0f) {
+                animation = ANIMATION_NORMAL;
+                animation_started = now;
+            } else {
+                if (progress < 0.22f) {
+                    visibility_value = progress / 0.22f;
+                }
+                // Shape the phase speed like the intro curve: nearly still,
+                // sharply fast, briefly sustained, then back to baseline.
+                float peak_speed = 51.5f;
+                if (progress < 0.05f) {
+                    float phase = progress / 0.05f;
+                    float eased = phase * phase * (3.0f - 2.0f * phase);
+                    speed = 0.01f + (peak_speed - 0.01f) * eased;
+                } else if (progress < 0.10f) {
+                    speed = peak_speed;
+                } else {
+                    float phase = (progress - 0.10f) / 0.90f;
+                    float decay = expf(-10.0f * phase);
+                    float end_decay = expf(-10.0f);
+                    speed = 1.0f + (peak_speed - 1.0f)
+                        * (decay - end_decay) / (1.0f - end_decay);
+                }
+                brightness_value = visibility_value;
+            }
+        } else if (animation == ANIMATION_EXIT) {
+            float progress = (float)(animation_progress / 1.0);
+            if (progress >= 1.0f) {
+                animation = ANIMATION_HIDDEN;
+                visibility_value = 0.0f;
+            } else {
+                visibility_value = 1.0f - progress;
+                float eased = progress * progress * (3.0f - 2.0f * progress);
+                speed = 1.0f - 0.85f * eased;
+            }
+        } else if (animation == ANIMATION_HIDDEN) {
+            visibility_value = 0.0f;
+        }
+
+        motion_time += frame_delta * speed;
+        float elapsed = (float)motion_time;
         if (now - last_palette >= 0.5) {
             read_palette(&app);
             last_palette = now;
@@ -595,7 +755,7 @@ int main(int argc, char **argv) {
                     if (now - app.pressure_since >= PRESSURE_CONFIRM_SECONDS) {
                         // Preserve the exact frame that was visible when the
                         // governor engaged, then stop all animation draws.
-                        render(&app, elapsed, app.capture_snapshots);
+                        render(&app, elapsed, brightness_value, visibility_value, app.capture_snapshots);
                         app.frozen = true;
                         app.pressure_since = 0.0;
                         app.recovery_since = 0.0;
@@ -626,10 +786,11 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        render(&app, elapsed, capture_snapshot);
+        render(&app, elapsed, brightness_value, visibility_value, capture_snapshot);
         struct timespec pause = {0, 16000000L};
         nanosleep(&pause, NULL);
     }
+    close(app.control_fd);
     for (size_t i = 0; i < app.output_count; i++) {
         if (app.outputs[i].egl_surface != EGL_NO_SURFACE) eglDestroySurface(app.egl_display, app.outputs[i].egl_surface);
         if (app.outputs[i].egl_window) wl_egl_window_destroy(app.outputs[i].egl_window);

@@ -4,6 +4,8 @@ uniform vec2 u_resolution;
 uniform vec2 u_origin;
 uniform vec2 u_canvas;
 uniform float u_time;
+uniform float u_brightness;
+uniform float u_visibility;
 uniform vec3 u_primary;
 uniform vec3 u_secondary;
 uniform vec3 u_surface;
@@ -113,5 +115,6 @@ void main() {
 
     // Keep the empty upper and lower thirds nearly black for contrast.
     color *= 0.78 + 0.06 * smoothstep(0.0, 1.0, local.x);
+    color *= u_brightness * u_visibility;
     gl_FragColor = vec4(color, 1.0);
 }
