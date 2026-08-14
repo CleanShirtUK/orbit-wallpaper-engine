@@ -674,11 +674,19 @@ int main(int argc, char **argv) {
 
         int animation_request = read_animation_request(&app);
         if (animation_request == 1) {
+            // Session transitions must remain visible even if the resource
+            // governor froze the normal wallpaper during a game.
+            app.frozen = false;
+            app.pressure_since = 0.0;
+            app.recovery_since = 0.0;
             animation = ANIMATION_INTRO;
             animation_started = now;
             motion_time = 0.0;
             animation_request = 0;
         } else if (animation_request == 2) {
+            app.frozen = false;
+            app.pressure_since = 0.0;
+            app.recovery_since = 0.0;
             animation = ANIMATION_EXIT;
             animation_started = now;
             animation_request = 0;

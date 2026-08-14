@@ -54,6 +54,15 @@ The companion session-effects service uses this mode during login so it can
 wait for Noctalia before triggering the single startup intro. Manual intro
 requests through the control FIFO are unaffected.
 
+Explicit `intro` and `exit` requests also thaw the resource governor so session
+transitions are rendered immediately after a high-load game closes.
+
+The dotfiles repository also monitors Hyprland's `steam_app_*` clients. When a
+game is open it writes `exit` to this FIFO directly, showing the exit animation
+without playing a session sound or changing workspaces. When the last game
+closes it writes `intro` to restore the animation. This path intentionally
+bypasses the broader session transition script.
+
 ## Resource governor
 
 The renderer samples AMD's `gpu_busy_percent` value and `/proc/loadavg` twice
