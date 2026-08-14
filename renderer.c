@@ -32,6 +32,10 @@
 #define CPU_PRESSURE_EXIT 0.65
 #define PRESSURE_CONFIRM_SECONDS 3.0
 #define RECOVERY_CONFIRM_SECONDS 10.0
+#define INTRO_DURATION_SECONDS 4.5f
+#define INTRO_PEAK_SPEED 34.0f
+#define INTRO_PEAK_START 0.05f
+#define INTRO_PEAK_END 0.08f
 
 struct color { float r, g, b; };
 
@@ -685,7 +689,7 @@ int main(int argc, char **argv) {
         float speed = 1.0f;
         double animation_progress = now - animation_started;
         if (animation == ANIMATION_INTRO) {
-            float progress = (float)(animation_progress / 4.5);
+            float progress = (float)(animation_progress / INTRO_DURATION_SECONDS);
             if (progress >= 1.0f) {
                 animation = ANIMATION_NORMAL;
                 animation_started = now;
@@ -695,15 +699,15 @@ int main(int argc, char **argv) {
                 }
                 // Shape the phase speed like the intro curve: nearly still,
                 // sharply fast, briefly sustained, then back to baseline.
-                float peak_speed = 51.5f;
-                if (progress < 0.05f) {
-                    float phase = progress / 0.05f;
+                float peak_speed = INTRO_PEAK_SPEED;
+                if (progress < INTRO_PEAK_START) {
+                    float phase = progress / INTRO_PEAK_START;
                     float eased = phase * phase * (3.0f - 2.0f * phase);
                     speed = 0.01f + (peak_speed - 0.01f) * eased;
-                } else if (progress < 0.10f) {
+                } else if (progress < INTRO_PEAK_END) {
                     speed = peak_speed;
                 } else {
-                    float phase = (progress - 0.10f) / 0.90f;
+                    float phase = (progress - INTRO_PEAK_END) / (1.0f - INTRO_PEAK_END);
                     float decay = expf(-10.0f * phase);
                     float end_decay = expf(-10.0f);
                     speed = 1.0f + (peak_speed - 1.0f)
