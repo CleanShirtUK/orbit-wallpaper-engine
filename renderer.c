@@ -64,6 +64,8 @@ struct app {
     struct color target_colors[4];
     time_t palette_mtime;
     bool snapshot_dirty;
+    bool greeter_sync_pending;
+    double next_greeter_sync;
     bool debug_frames;
     bool frozen;
     double pressure_since;
@@ -412,14 +414,24 @@ static bool create_output_surfaces(struct app *app) {
 
 static bool write_png(struct output *item, const uint8_t *pixels) {
     char path[PATH_MAX];
+    char temporary_path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s.png", item->app->snapshot_dir, item->name);
-    FILE *file = fopen(path, "wb");
-    if (!file) return false;
+    snprintf(temporary_path, sizeof(temporary_path), "%s/.%s.png.tmp.XXXXXX",
+             item->app->snapshot_dir, item->name);
+    int descriptor = mkstemp(temporary_path);
+    if (descriptor < 0) return false;
+    FILE *file = fdopen(descriptor, "wb");
+    if (!file) {
+        close(descriptor);
+        unlink(temporary_path);
+        return false;
+    }
     png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     png_infop info = png_create_info_struct(png);
     if (!png || !info || setjmp(png_jmpbuf(png))) {
         if (png) png_destroy_write_struct(&png, &info);
         fclose(file);
+        unlink(temporary_path);
         return false;
     }
     png_init_io(png, file);
@@ -430,7 +442,10 @@ static bool write_png(struct output *item, const uint8_t *pixels) {
     for (int y = item->height - 1; y >= 0; y--) png_write_row(png, pixels + (size_t)y * stride);
     png_write_end(png, NULL);
     png_destroy_write_struct(&png, &info);
-    fclose(file);
+    if (fclose(file) != 0 || rename(temporary_path, path) != 0) {
+        unlink(temporary_path);
+        return false;
+    }
     return true;
 }
 
@@ -450,6 +465,7 @@ static void set_vec3(GLint location, struct color color) {
 
 static void render(struct app *app, float seconds, bool capture_snapshot) {
     static const GLfloat triangle[] = {-1, -1, 3, -1, -1, 3};
+    bool snapshots_saved = true;
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
         if (item->closed) continue;
@@ -467,12 +483,20 @@ static void render(struct app *app, float seconds, bool capture_snapshot) {
         set_vec3(app->surface, app->colors[2]);
         set_vec3(app->error, app->colors[3]);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        if (capture_snapshot) save_snapshot(item);
+        if (capture_snapshot && !save_snapshot(item)) snapshots_saved = false;
         eglSwapBuffers(app->egl_display, item->egl_surface);
     }
-    if (app->snapshot_dirty) {
-        app->snapshot_dirty = false;
-        system("noctalia msg greeter-sync >/dev/null 2>&1 || true");
+    if (capture_snapshot) {
+        app->snapshot_dirty = !snapshots_saved;
+        if (snapshots_saved) app->greeter_sync_pending = true;
+    }
+    double now = monotonic_seconds();
+    if (app->greeter_sync_pending && now >= app->next_greeter_sync) {
+        if (system("noctalia msg greeter-sync >/dev/null 2>&1") == 0) {
+            app->greeter_sync_pending = false;
+        } else {
+            app->next_greeter_sync = now + 1.0;
+        }
     }
     eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
