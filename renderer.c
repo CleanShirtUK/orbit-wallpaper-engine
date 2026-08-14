@@ -66,6 +66,7 @@ struct app {
     bool snapshot_dirty;
     bool greeter_sync_pending;
     double next_greeter_sync;
+    bool capture_snapshots;
     bool debug_frames;
     bool frozen;
     double pressure_since;
@@ -184,7 +185,7 @@ static bool read_palette(struct app *app) {
         if (quote) app->target_colors[i] = hex_color(quote + 1);
     }
     app->palette_mtime = file_stat.st_mtime;
-    app->snapshot_dirty = true;
+    app->snapshot_dirty = app->capture_snapshots;
     return true;
 }
 
@@ -515,11 +516,12 @@ int main(int argc, char **argv) {
     app.colors[1] = app.target_colors[1] = (struct color){0.1f, 0.65f, 0.85f};
     app.colors[2] = app.target_colors[2] = (struct color){0.1f, 0.12f, 0.15f};
     app.colors[3] = app.target_colors[3] = (struct color){0.95f, 0.25f, 0.35f};
-    app.snapshot_dirty = true;
+    app.capture_snapshots = getenv("PS3_WAVE_DISABLE_SNAPSHOTS") == NULL;
+    app.snapshot_dirty = app.capture_snapshots;
     app.debug_frames = getenv("PS3_WAVE_DEBUG_FRAMES") != NULL;
     snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
     snprintf(app.snapshot_dir, sizeof(app.snapshot_dir), "%s/%s", home, DEFAULT_SNAPSHOT_RELATIVE);
-    if (mkdir(app.snapshot_dir, 0755) != 0 && access(app.snapshot_dir, F_OK) != 0) {
+    if (app.capture_snapshots && mkdir(app.snapshot_dir, 0755) != 0 && access(app.snapshot_dir, F_OK) != 0) {
         fprintf(stderr, "cannot create snapshot directory: %s\n", app.snapshot_dir);
         return 1;
     }
@@ -575,7 +577,8 @@ int main(int argc, char **argv) {
             app.colors[i].b += (app.target_colors[i].b - app.colors[i].b) * 0.025f;
         }
         bool capture_snapshot = app.snapshot_dirty;
-        if (app.debug_frames && (last_debug_snapshot < 0.0f || elapsed - last_debug_snapshot >= 0.5f)) {
+        if (app.capture_snapshots && app.debug_frames &&
+            (last_debug_snapshot < 0.0f || elapsed - last_debug_snapshot >= 0.5f)) {
             capture_snapshot = true;
             last_debug_snapshot = elapsed;
         }
@@ -592,7 +595,7 @@ int main(int argc, char **argv) {
                     if (now - app.pressure_since >= PRESSURE_CONFIRM_SECONDS) {
                         // Preserve the exact frame that was visible when the
                         // governor engaged, then stop all animation draws.
-                        render(&app, elapsed, true);
+                        render(&app, elapsed, app.capture_snapshots);
                         app.frozen = true;
                         app.pressure_since = 0.0;
                         app.recovery_since = 0.0;
