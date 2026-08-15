@@ -32,10 +32,13 @@
 #define CPU_PRESSURE_EXIT 0.65
 #define PRESSURE_CONFIRM_SECONDS 3.0
 #define RECOVERY_CONFIRM_SECONDS 10.0
-#define INTRO_DURATION_SECONDS 4.5f
-#define INTRO_PEAK_SPEED 34.0f
-#define INTRO_PEAK_START 0.05f
-#define INTRO_PEAK_END 0.08f
+#define DEFAULT_INTRO_DURATION_SECONDS 4.5f
+#define DEFAULT_EXIT_DURATION_SECONDS 1.0f
+#define DEFAULT_INTRO_PEAK_SPEED 34.0f
+#define DEFAULT_INTRO_PEAK_START 0.05f
+#define DEFAULT_INTRO_PEAK_END 0.08f
+#define DEFAULT_INTRO_REVEAL_END 0.22f
+#define DEFAULT_INTRO_DECAY 10.0f
 
 struct color { float r, g, b; };
 
@@ -87,6 +90,13 @@ struct app {
     char background_path[PATH_MAX];
     char control_path[PATH_MAX];
     int control_fd;
+    float intro_duration;
+    float exit_duration;
+    float intro_peak_speed;
+    float intro_peak_start;
+    float intro_peak_end;
+    float intro_reveal_end;
+    float intro_decay;
 };
 
 enum animation_mode { ANIMATION_NORMAL, ANIMATION_INTRO, ANIMATION_EXIT, ANIMATION_HIDDEN };
@@ -102,6 +112,18 @@ static double monotonic_seconds(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
+}
+
+static float environment_float(const char *name, float fallback, float minimum, float maximum) {
+    const char *value = getenv(name);
+    if (!value || !*value) return fallback;
+    char *end = NULL;
+    float parsed = strtof(value, &end);
+    if (end == value || *end != '\0' || parsed < minimum || parsed > maximum) {
+        fprintf(stderr, "invalid %s; using %.3f\n", name, fallback);
+        return fallback;
+    }
+    return parsed;
 }
 
 static bool read_gpu_busy(struct app *app, double *busy) {
@@ -591,6 +613,18 @@ int main(int argc, char **argv) {
     app.capture_snapshots = getenv("PS3_WAVE_DISABLE_SNAPSHOTS") == NULL;
     app.snapshot_dirty = app.capture_snapshots;
     app.debug_frames = getenv("PS3_WAVE_DEBUG_FRAMES") != NULL;
+    app.intro_duration = environment_float("PS3_WAVE_INTRO_DURATION", DEFAULT_INTRO_DURATION_SECONDS, 0.1f, 60.0f);
+    app.exit_duration = environment_float("PS3_WAVE_EXIT_DURATION", DEFAULT_EXIT_DURATION_SECONDS, 0.1f, 60.0f);
+    app.intro_peak_speed = environment_float("PS3_WAVE_INTRO_PEAK_SPEED", DEFAULT_INTRO_PEAK_SPEED, 0.01f, 1000.0f);
+    app.intro_peak_start = environment_float("PS3_WAVE_INTRO_PEAK_START", DEFAULT_INTRO_PEAK_START, 0.0f, 0.99f);
+    app.intro_peak_end = environment_float("PS3_WAVE_INTRO_PEAK_END", DEFAULT_INTRO_PEAK_END, 0.01f, 1.0f);
+    app.intro_reveal_end = environment_float("PS3_WAVE_INTRO_REVEAL_END", DEFAULT_INTRO_REVEAL_END, 0.01f, 1.0f);
+    app.intro_decay = environment_float("PS3_WAVE_INTRO_DECAY", DEFAULT_INTRO_DECAY, 0.01f, 100.0f);
+    if (app.intro_peak_end <= app.intro_peak_start) {
+        fprintf(stderr, "intro peak end must be after peak start; using defaults\n");
+        app.intro_peak_start = DEFAULT_INTRO_PEAK_START;
+        app.intro_peak_end = DEFAULT_INTRO_PEAK_END;
+    }
     snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
     snprintf(app.snapshot_dir, sizeof(app.snapshot_dir), "%s/%s", home, DEFAULT_SNAPSHOT_RELATIVE);
     const char *background_path = getenv("PS3_WAVE_BACKGROUND_FILE");
@@ -702,34 +736,34 @@ int main(int argc, char **argv) {
         float speed = 1.0f;
         double animation_progress = now - animation_started;
         if (animation == ANIMATION_INTRO) {
-            float progress = (float)(animation_progress / INTRO_DURATION_SECONDS);
+            float progress = (float)(animation_progress / app.intro_duration);
             if (progress >= 1.0f) {
                 animation = ANIMATION_NORMAL;
                 animation_started = now;
             } else {
-                if (progress < 0.22f) {
-                    visibility_value = progress / 0.22f;
+                if (progress < app.intro_reveal_end) {
+                    visibility_value = progress / app.intro_reveal_end;
                 }
                 // Shape the phase speed like the intro curve: nearly still,
                 // sharply fast, briefly sustained, then back to baseline.
-                float peak_speed = INTRO_PEAK_SPEED;
-                if (progress < INTRO_PEAK_START) {
-                    float phase = progress / INTRO_PEAK_START;
+                float peak_speed = app.intro_peak_speed;
+                if (progress < app.intro_peak_start) {
+                    float phase = progress / app.intro_peak_start;
                     float eased = phase * phase * (3.0f - 2.0f * phase);
                     speed = 0.01f + (peak_speed - 0.01f) * eased;
-                } else if (progress < INTRO_PEAK_END) {
+                } else if (progress < app.intro_peak_end) {
                     speed = peak_speed;
                 } else {
-                    float phase = (progress - INTRO_PEAK_END) / (1.0f - INTRO_PEAK_END);
-                    float decay = expf(-10.0f * phase);
-                    float end_decay = expf(-10.0f);
+                    float phase = (progress - app.intro_peak_end) / (1.0f - app.intro_peak_end);
+                    float decay = expf(-app.intro_decay * phase);
+                    float end_decay = expf(-app.intro_decay);
                     speed = 1.0f + (peak_speed - 1.0f)
                         * (decay - end_decay) / (1.0f - end_decay);
                 }
                 brightness_value = visibility_value;
             }
         } else if (animation == ANIMATION_EXIT) {
-            float progress = (float)(animation_progress / 1.0);
+            float progress = (float)(animation_progress / app.exit_duration);
             if (progress >= 1.0f) {
                 animation = ANIMATION_HIDDEN;
                 visibility_value = 0.0f;

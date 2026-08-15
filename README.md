@@ -11,6 +11,10 @@ than appearing as a hard color cut. A PNG frame for each output is exported to
 `$HOME/.cache/ps3-wave-wallpaper/` and Noctalia's greeter sync is triggered
 after a palette change.
 
+The renderer does not require the dotfiles repository. The companion service
+may provide paths and animation settings through environment variables, but the
+binary, shader, and default tuning remain self-contained here.
+
 ## Build
 
 ```sh
@@ -74,3 +78,21 @@ available CPU count for three seconds, it saves the current frame and freezes
 the existing Wayland background buffer. No animation or EGL drawing occurs
 while frozen. Animation resumes after both GPU usage falls below 45% and load
 falls below 65% of the CPU count for ten seconds.
+
+## Animation configuration
+
+The optional `ps3-wave-wallpaper.conf` file exposes the launch and exit timing
+without requiring a rebuild. The systemd unit loads it when present. It contains
+the current defaults for intro duration, exit duration, peak speed, peak timing,
+reveal timing, and the intro speed decay curve. Invalid values are rejected and
+the compiled defaults are used instead.
+
+## Reproduction and AI usage
+
+Install the documented Wayland, EGL/GLES2, libpng, compiler, and `make`
+dependencies for the host distribution, then run `make`. The repository is
+intended to build independently of the companion dotfiles repository.
+
+Parts of this repository may be created or modified with AI assistance. Human
+review remains responsible for correctness, security, performance, and visual
+behavior.
