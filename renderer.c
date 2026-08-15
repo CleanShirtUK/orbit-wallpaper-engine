@@ -249,6 +249,7 @@ static int read_animation_request(struct app *app) {
     commands[length] = '\0';
     if (strstr(commands, "intro")) return 1;
     if (strstr(commands, "exit")) return 2;
+    if (strstr(commands, "palette")) return 3;
     return 0;
 }
 
@@ -729,6 +730,11 @@ int main(int argc, char **argv) {
             animation = ANIMATION_EXIT;
             animation_started = now;
             animation_request = 0;
+        } else if (animation_request == 3) {
+            app.palette_mtime = 0;
+            read_palette(&app);
+            last_palette = now;
+            animation_request = 0;
         }
 
         float brightness_value = 1.0f;
@@ -778,7 +784,9 @@ int main(int argc, char **argv) {
 
         motion_time += frame_delta * speed;
         float elapsed = (float)motion_time;
-        if (now - last_palette >= 0.5) {
+        // Noctalia sends an explicit palette request through the control FIFO.
+        // Keep a slow fallback for external edits or missed hook delivery.
+        if (now - last_palette >= 5.0) {
             read_palette(&app);
             last_palette = now;
         }

@@ -87,6 +87,10 @@ the current defaults for intro duration, exit duration, peak speed, peak timing,
 reveal timing, and the intro speed decay curve. Invalid values are rejected and
 the compiled defaults are used instead.
 
+Palette changes are normally delivered by Noctalia's `colors_changed` hook via
+the renderer control FIFO. The renderer keeps a five-second fallback check for
+external edits or missed hook delivery.
+
 ## Reproduction and AI usage
 
 Install the documented Wayland, EGL/GLES2, libpng, compiler, and `make`
