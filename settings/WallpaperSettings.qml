@@ -386,8 +386,8 @@ Item {
     id: wallpaperRoot
     anchors.fill: parent
 
-        property string configPath: Quickshell.env("HOME") + "/.config/ps3-wave-wallpaper/config"
-        property string shaderDirectory: Quickshell.env("HOME") + "/.config/ps3-wave-wallpaper/shaders"
+        property string configPath: Quickshell.env("HOME") + "/.config/orbit-wallpaper-engine/config"
+        property string shaderDirectory: Quickshell.env("HOME") + "/.config/orbit-wallpaper-engine/shaders"
         property var shaderFiles: ["wave.frag (default)"]
         property string selectedShader: ""
         property real introDuration: 4.5
@@ -463,22 +463,22 @@ Item {
                 return fallback
             }
 
-            introDuration = numberValue("PS3_WAVE_INTRO_DURATION", 4.5)
-            exitDuration = numberValue("PS3_WAVE_EXIT_DURATION", 1.0)
-            introPeakSpeed = numberValue("PS3_WAVE_INTRO_PEAK_SPEED", 34.0)
-            introPeakStart = numberValue("PS3_WAVE_INTRO_PEAK_START", 0.05)
-            introPeakEnd = numberValue("PS3_WAVE_INTRO_PEAK_END", 0.08)
-            introRevealEnd = numberValue("PS3_WAVE_INTRO_REVEAL_END", 0.22)
-            introDecay = numberValue("PS3_WAVE_INTRO_DECAY", 10.0)
-            paletteStrength = numberValue("PS3_WAVE_PALETTE_STRENGTH", 0.72)
-            peakBrightness = numberValue("PS3_WAVE_PEAK_BRIGHTNESS", 1.0)
-            targetFps = numberValue("PS3_WAVE_TARGET_FPS", 60.0)
-            renderScale = numberValue("PS3_WAVE_RENDER_SCALE", 1.0)
-            shaderSpeed = numberValue("PS3_WAVE_SPEED", 1.0)
-            resourceGovernor = boolValue("PS3_WAVE_RESOURCE_GOVERNOR", true)
-            gpuPressureEnter = numberValue("PS3_WAVE_GPU_PRESSURE_ENTER", 75.0)
-            gpuPressureExit = numberValue("PS3_WAVE_GPU_PRESSURE_EXIT", 45.0)
-            selectedShader = values["PS3_WAVE_SHADER"] || ""
+            introDuration = numberValue("ORBIT_WALLPAPER_INTRO_DURATION", 4.5)
+            exitDuration = numberValue("ORBIT_WALLPAPER_EXIT_DURATION", 1.0)
+            introPeakSpeed = numberValue("ORBIT_WALLPAPER_INTRO_PEAK_SPEED", 34.0)
+            introPeakStart = numberValue("ORBIT_WALLPAPER_INTRO_PEAK_START", 0.05)
+            introPeakEnd = numberValue("ORBIT_WALLPAPER_INTRO_PEAK_END", 0.08)
+            introRevealEnd = numberValue("ORBIT_WALLPAPER_INTRO_REVEAL_END", 0.22)
+            introDecay = numberValue("ORBIT_WALLPAPER_INTRO_DECAY", 10.0)
+            paletteStrength = numberValue("ORBIT_WALLPAPER_PALETTE_STRENGTH", 0.72)
+            peakBrightness = numberValue("ORBIT_WALLPAPER_PEAK_BRIGHTNESS", 1.0)
+            targetFps = numberValue("ORBIT_WALLPAPER_TARGET_FPS", 60.0)
+            renderScale = numberValue("ORBIT_WALLPAPER_RENDER_SCALE", 1.0)
+            shaderSpeed = numberValue("ORBIT_WALLPAPER_SPEED", 1.0)
+            resourceGovernor = boolValue("ORBIT_WALLPAPER_RESOURCE_GOVERNOR", true)
+            gpuPressureEnter = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", 75.0)
+            gpuPressureExit = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", 45.0)
+            selectedShader = values["ORBIT_WALLPAPER_SHADER"] || ""
             wallpaperDirty = false
             configLoaded = true
         }
@@ -586,25 +586,25 @@ Item {
             wallpaperStatusText = "Saving…"
 
             var values = [
-                "PS3_WAVE_INTRO_DURATION=" + Number(introDuration).toFixed(3),
-                "PS3_WAVE_EXIT_DURATION=" + Number(exitDuration).toFixed(3),
-                "PS3_WAVE_INTRO_PEAK_SPEED=" + Number(introPeakSpeed).toFixed(3),
-                "PS3_WAVE_INTRO_PEAK_START=" + Number(introPeakStart).toFixed(3),
-                "PS3_WAVE_INTRO_PEAK_END=" + Number(introPeakEnd).toFixed(3),
-                "PS3_WAVE_INTRO_REVEAL_END=" + Number(introRevealEnd).toFixed(3),
-                "PS3_WAVE_INTRO_DECAY=" + Number(introDecay).toFixed(3),
-                "PS3_WAVE_PALETTE_STRENGTH=" + Number(paletteStrength).toFixed(3),
-                "PS3_WAVE_PEAK_BRIGHTNESS=" + Number(peakBrightness).toFixed(3),
-                "PS3_WAVE_TARGET_FPS=" + Number(targetFps).toFixed(1),
-                "PS3_WAVE_RENDER_SCALE=" + Number(renderScale).toFixed(2),
-                "PS3_WAVE_SPEED=" + Number(shaderSpeed).toFixed(2),
-                "PS3_WAVE_RESOURCE_GOVERNOR=" + (resourceGovernor ? "1" : "0"),
-                "PS3_WAVE_GPU_PRESSURE_ENTER=" + Number(gpuPressureEnter).toFixed(0),
-                "PS3_WAVE_GPU_PRESSURE_EXIT=" + Number(gpuPressureExit).toFixed(0)
+                "ORBIT_WALLPAPER_INTRO_DURATION=" + Number(introDuration).toFixed(3),
+                "ORBIT_WALLPAPER_EXIT_DURATION=" + Number(exitDuration).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_SPEED=" + Number(introPeakSpeed).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_START=" + Number(introPeakStart).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_END=" + Number(introPeakEnd).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_REVEAL_END=" + Number(introRevealEnd).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_DECAY=" + Number(introDecay).toFixed(3),
+                "ORBIT_WALLPAPER_PALETTE_STRENGTH=" + Number(paletteStrength).toFixed(3),
+                "ORBIT_WALLPAPER_PEAK_BRIGHTNESS=" + Number(peakBrightness).toFixed(3),
+                "ORBIT_WALLPAPER_TARGET_FPS=" + Number(targetFps).toFixed(1),
+                "ORBIT_WALLPAPER_RENDER_SCALE=" + Number(renderScale).toFixed(2),
+                "ORBIT_WALLPAPER_SPEED=" + Number(shaderSpeed).toFixed(2),
+                "ORBIT_WALLPAPER_RESOURCE_GOVERNOR=" + (resourceGovernor ? "1" : "0"),
+                "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER=" + Number(gpuPressureEnter).toFixed(0),
+                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT=" + Number(gpuPressureExit).toFixed(0)
             ]
 
             if (selectedShader)
-                values.push("PS3_WAVE_SHADER=" + selectedShader)
+                values.push("ORBIT_WALLPAPER_SHADER=" + selectedShader)
 
             saveWallpaperConfig.command = [
                 "/usr/bin/python3",
@@ -612,7 +612,7 @@ Item {
                 "import os,sys,tempfile\n"
                 + "path=sys.argv[1]\n"
                 + "updates=dict(x.split('=',1) for x in sys.argv[2:])\n"
-                + "managed=set(updates)|{'PS3_WAVE_SHADER'}\n"
+                + "managed=set(updates)|{'ORBIT_WALLPAPER_SHADER'}\n"
                 + "try:\n"
                 + "    old=open(path,encoding='utf-8').read().splitlines()\n"
                 + "except FileNotFoundError:\n"
@@ -742,9 +742,9 @@ Item {
         Process {
             id: applyWallpaperProcess
             command: ["/usr/bin/sh", "-c",
-                "systemctl --user restart ps3-wave-wallpaper.service"
+                "systemctl --user restart orbit-wallpaper-engine.service"
                 + " && sleep 0.15"
-                + " && systemctl --user reload ps3-wave-wallpaper.service"]
+                + " && systemctl --user reload orbit-wallpaper-engine.service"]
             running: false
             stdout: StdioCollector {}
             onExited: function(exitCode) {
@@ -757,7 +757,7 @@ Item {
 
         Process {
             id: replayIntroProcess
-            command: ["/usr/bin/systemctl", "--user", "reload", "ps3-wave-wallpaper.service"]
+            command: ["/usr/bin/systemctl", "--user", "reload", "orbit-wallpaper-engine.service"]
             running: false
             stdout: StdioCollector {}
             onExited: function(exitCode) {
@@ -932,7 +932,7 @@ Item {
                     }
 
                     Text {
-                        text: "Installed shaders are loaded from ~/.config/ps3-wave-wallpaper/shaders."
+                        text: "Installed shaders are loaded from ~/.config/orbit-wallpaper-engine/shaders."
                         color: mutedColor()
                         font.family: themeData.uiFont
                         font.pixelSize: 9

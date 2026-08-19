@@ -2,7 +2,7 @@
 """Wallpaper-specific backend extracted from Orbit settings.
 
 Step-3 compatibility version: intentionally retains the current
-ps3-wave-wallpaper paths/service/PS3_WAVE_* configuration contract so it can
+ps3-wave-wallpaper paths/service/ORBIT_WALLPAPER_* configuration contract so it can
 be tested without changing the live renderer or Orbit.
 """
 
@@ -42,7 +42,7 @@ SHADER_THUMB_BASE = (
 # after standalone behaviour has been verified.
 SHADER_CONFIG_DIR = Path(os.environ.get(
     "ORBIT_WALLPAPER_CONFIG_DIR",
-    HOME / ".config/ps3-wave-wallpaper",
+    HOME / ".config/orbit-wallpaper-engine",
 ))
 SHADER_INSTALL_DIR = SHADER_CONFIG_DIR / "shaders"
 SHADER_RENDERER_CONFIG = SHADER_CONFIG_DIR / "config"
@@ -53,7 +53,7 @@ SHADER_CACHE = Path(os.environ.get(
 ))
 SHADER_SERVICE = os.environ.get(
     "ORBIT_WALLPAPER_SERVICE",
-    "ps3-wave-wallpaper.service",
+    "orbit-wallpaper-engine.service",
 )
 SHADER_CACHE_TTL = 6 * 60 * 60
 SHADER_HEADER_LIMIT = 16384
@@ -428,7 +428,7 @@ def _current_renderer_shader() -> str | None:
         return None
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("PS3_WAVE_SHADER="):
+        if stripped.startswith("ORBIT_WALLPAPER_SHADER="):
             return stripped.split("=", 1)[1].strip() or None
     return None
 
@@ -444,9 +444,9 @@ def _set_renderer_shader(filename: str | None) -> None:
     replaced = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("PS3_WAVE_SHADER="):
+        if stripped.startswith("ORBIT_WALLPAPER_SHADER="):
             if filename and not replaced:
-                output.append(f"PS3_WAVE_SHADER={filename}")
+                output.append(f"ORBIT_WALLPAPER_SHADER={filename}")
                 replaced = True
             continue
         output.append(line)
@@ -454,7 +454,7 @@ def _set_renderer_shader(filename: str | None) -> None:
     if filename and not replaced:
         if output and output[-1].strip():
             output.append("")
-        output.append(f"PS3_WAVE_SHADER={filename}")
+        output.append(f"ORBIT_WALLPAPER_SHADER={filename}")
 
     atomic_write(SHADER_RENDERER_CONFIG, "\n".join(output).rstrip() + "\n")
 

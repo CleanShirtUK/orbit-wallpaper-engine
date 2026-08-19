@@ -1,6 +1,6 @@
 CC ?= cc
 
-APP := ps3-wave-wallpaper
+APP := orbit-wallpaper-engine
 TARGET := $(APP)
 
 SOURCES := \
@@ -28,8 +28,8 @@ INSTALLED_DEFAULT_SHADER := $(APP_DATA_DIR)/wave.frag
 INSTALLED_CONFIG := $(APP_CONFIG_DIR)/config
 INSTALLED_SERVICE := $(SYSTEMD_USER_DIR)/$(APP).service
 
-DEFAULT_CONFIG_SRC := ps3-wave-wallpaper.conf
-SERVICE_SRC := ps3-wave-wallpaper.service
+DEFAULT_CONFIG_SRC := orbit-wallpaper-engine.conf
+SERVICE_SRC := orbit-wallpaper-engine.service
 
 .PHONY: all clean install install-config install-service daemon-reload enable restart reload intro deploy uninstall status paths
 
@@ -68,19 +68,19 @@ install-config:
 		printf 'Installed initial config: %s\n' "$(INSTALLED_CONFIG)"; \
 	else \
 		printf '%s\n' \
-			'# ps3-wave-wallpaper user configuration' \
+			'# orbit-wallpaper-engine user configuration' \
 			'' \
-			'PS3_WAVE_INTRO_DURATION=4.5' \
-			'PS3_WAVE_EXIT_DURATION=1.0' \
-			'PS3_WAVE_INTRO_PEAK_SPEED=34.0' \
-			'PS3_WAVE_INTRO_PEAK_START=0.05' \
-			'PS3_WAVE_INTRO_PEAK_END=0.08' \
-			'PS3_WAVE_INTRO_REVEAL_END=0.22' \
-			'PS3_WAVE_INTRO_DECAY=10.0' \
-			'PS3_WAVE_PALETTE_STRENGTH=0.72' \
+			'ORBIT_WALLPAPER_INTRO_DURATION=4.5' \
+			'ORBIT_WALLPAPER_EXIT_DURATION=1.0' \
+			'ORBIT_WALLPAPER_INTRO_PEAK_SPEED=34.0' \
+			'ORBIT_WALLPAPER_INTRO_PEAK_START=0.05' \
+			'ORBIT_WALLPAPER_INTRO_PEAK_END=0.08' \
+			'ORBIT_WALLPAPER_INTRO_REVEAL_END=0.22' \
+			'ORBIT_WALLPAPER_INTRO_DECAY=10.0' \
+			'ORBIT_WALLPAPER_PALETTE_STRENGTH=0.72' \
 			'' \
-			'# Filename from ~/.config/ps3-wave-wallpaper/shaders/' \
-			'# PS3_WAVE_SHADER=example.frag' \
+			'# Filename from ~/.config/orbit-wallpaper-engine/shaders/' \
+			'# ORBIT_WALLPAPER_SHADER=example.frag' \
 			> "$(INSTALLED_CONFIG)"; \
 		printf 'Created initial config: %s\n' "$(INSTALLED_CONFIG)"; \
 	fi
@@ -144,4 +144,4 @@ uninstall:
 	@printf '\nPreserved user data:\n'
 	@printf '  %s\n' "$(INSTALLED_CONFIG)"
 	@printf '  %s/\n' "$(APP_SHADER_DIR)"
-	@printf '\nRemove ~/.config/ps3-wave-wallpaper manually if you want to purge user data.\n'
+	@printf '\nRemove ~/.config/orbit-wallpaper-engine manually if you want to purge user data.\n'

@@ -24,9 +24,9 @@
 
 #define MAX_OUTPUTS 16
 #define DEFAULT_PALETTE_RELATIVE ".config/hypr/noctalia.lua"
-#define DEFAULT_SNAPSHOT_RELATIVE ".cache/ps3-wave-wallpaper"
-#define DEFAULT_BACKGROUND_RELATIVE ".cache/ps3-wave-wallpaper/hyprlock-background.conf"
-#define DEFAULT_CONTROL_RELATIVE ".cache/ps3-wave-wallpaper/control"
+#define DEFAULT_SNAPSHOT_RELATIVE ".cache/orbit-wallpaper-engine"
+#define DEFAULT_BACKGROUND_RELATIVE ".cache/orbit-wallpaper-engine/hyprlock-background.conf"
+#define DEFAULT_CONTROL_RELATIVE ".cache/orbit-wallpaper-engine/control"
 #define DEFAULT_SHADER_FILENAME "wave.frag"
 #define SHADER_DIRECTORY "shaders"
 #define DEFAULT_GPU_PRESSURE_ENTER 75.0f
@@ -94,6 +94,7 @@ struct app {
     struct color colors[4];
     struct color target_colors[4];
     time_t palette_mtime;
+    bool follow_system_palette;
     bool snapshot_dirty;
     bool greeter_sync_pending;
     double next_greeter_sync;
@@ -143,9 +144,20 @@ static double monotonic_seconds(void) {
     return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 
-static float environment_float(const char *name, float fallback, float minimum, float maximum) {
+static const char *environment_value(const char *name, const char *legacy_name) {
     const char *value = getenv(name);
-    if (!value || !*value) return fallback;
+    if (value && *value) return value;
+    if (legacy_name && *legacy_name) {
+        value = getenv(legacy_name);
+        if (value && *value) return value;
+    }
+    return NULL;
+}
+
+static float environment_float_compat(const char *name, const char *legacy_name,
+                                      float fallback, float minimum, float maximum) {
+    const char *value = environment_value(name, legacy_name);
+    if (!value) return fallback;
     char *end = NULL;
     float parsed = strtof(value, &end);
     if (end == value || *end != '\0' || parsed < minimum || parsed > maximum) {
@@ -155,19 +167,14 @@ static float environment_float(const char *name, float fallback, float minimum, 
     return parsed;
 }
 
-static bool environment_bool(const char *name, bool fallback) {
-    const char *value = getenv(name);
-    if (!value || !*value) return fallback;
-
+static bool environment_bool_compat(const char *name, const char *legacy_name,
+                                    bool fallback) {
+    const char *value = environment_value(name, legacy_name);
+    if (!value) return fallback;
     if (!strcasecmp(value, "1") || !strcasecmp(value, "true") ||
-        !strcasecmp(value, "yes") || !strcasecmp(value, "on")) {
-        return true;
-    }
+        !strcasecmp(value, "yes") || !strcasecmp(value, "on")) return true;
     if (!strcasecmp(value, "0") || !strcasecmp(value, "false") ||
-        !strcasecmp(value, "no") || !strcasecmp(value, "off")) {
-        return false;
-    }
-
+        !strcasecmp(value, "no") || !strcasecmp(value, "off")) return false;
     fprintf(stderr, "invalid %s; using %s\n", name, fallback ? "true" : "false");
     return fallback;
 }
@@ -256,6 +263,13 @@ static struct color hex_color(const char *value) {
     };
 }
 
+static struct color environment_color_compat(const char *name, const char *legacy_name,
+                                             const char *fallback) {
+    const char *value = environment_value(name, legacy_name);
+    return hex_color(value && *value ? value : fallback);
+}
+
+
 static struct color wallpaper_base_color(struct color surface) {
     float luminance = surface.r * 0.2126f + surface.g * 0.7152f + surface.b * 0.0722f;
     struct color rich = {
@@ -312,6 +326,7 @@ static int read_animation_request(struct app *app) {
 }
 
 static bool read_palette(struct app *app) {
+    if (!app->follow_system_palette) return false;
     struct stat file_stat;
     if (stat(app->palette_path, &file_stat) != 0 || file_stat.st_mtime == app->palette_mtime) {
         return false;
@@ -383,7 +398,7 @@ static bool resolve_shader_path(int argc, char **argv, char *path, size_t size,
     }
 
     if (snprintf(fallback, fallback_size, "%s/%s/%s",
-                 data_home, "ps3-wave-wallpaper", DEFAULT_SHADER_FILENAME)
+                 data_home, "orbit-wallpaper-engine", DEFAULT_SHADER_FILENAME)
         >= (int)fallback_size) {
         fprintf(stderr, "default shader path is too long\n");
         return false;
@@ -398,19 +413,19 @@ static bool resolve_shader_path(int argc, char **argv, char *path, size_t size,
         return true;
     }
 
-    const char *selected = getenv("PS3_WAVE_SHADER");
+    const char *selected = environment_value("ORBIT_WALLPAPER_SHADER", "PS3_WAVE_SHADER");
     if (selected && *selected) {
         if (!shader_filename_valid(selected)) {
             fprintf(stderr,
-                    "invalid PS3_WAVE_SHADER '%s'; expected a filename inside "
-                    "$XDG_CONFIG_HOME/ps3-wave-wallpaper/%s/; using %s\n",
+                    "invalid ORBIT_WALLPAPER_SHADER '%s'; expected a filename inside "
+                    "$XDG_CONFIG_HOME/orbit-wallpaper-engine/%s/; using %s\n",
                     selected, SHADER_DIRECTORY, DEFAULT_SHADER_FILENAME);
             snprintf(path, size, "%s", fallback);
             return true;
         }
 
         if (snprintf(path, size, "%s/%s/%s/%s",
-                     config_home, "ps3-wave-wallpaper", SHADER_DIRECTORY, selected)
+                     config_home, "orbit-wallpaper-engine", SHADER_DIRECTORY, selected)
             >= (int)size) {
             fprintf(stderr,
                     "selected shader path is too long; using %s\n",
@@ -852,7 +867,7 @@ static bool create_output_surfaces(struct app *app) {
         item->surface = wl_compositor_create_surface(app->compositor);
         item->layer = zwlr_layer_shell_v1_get_layer_surface(
             app->layer_shell, item->surface, item->wl_output,
-            ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "ps3-wave-wallpaper");
+            ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "orbit-wallpaper-engine");
         zwlr_layer_surface_v1_add_listener(item->layer, &layer_listener, item);
         zwlr_layer_surface_v1_set_anchor(item->layer,
             ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -1111,31 +1126,38 @@ int main(int argc, char **argv) {
     signal(SIGINT, stop_handler);
     signal(SIGTERM, stop_handler);
     struct app app = {0};
-    app.colors[0] = app.target_colors[0] = (struct color){0.45f, 0.8f, 0.93f};
-    app.colors[1] = app.target_colors[1] = (struct color){0.1f, 0.65f, 0.85f};
-    app.colors[2] = app.target_colors[2] = (struct color){0.1f, 0.12f, 0.15f};
-    app.colors[3] = app.target_colors[3] = (struct color){0.95f, 0.25f, 0.35f};
-    app.capture_snapshots = getenv("PS3_WAVE_DISABLE_SNAPSHOTS") == NULL;
+    app.colors[0] = app.target_colors[0] = environment_color_compat(
+        "ORBIT_WALLPAPER_PRIMARY", "PS3_WAVE_PRIMARY", "#7AA2F7");
+    app.colors[1] = app.target_colors[1] = environment_color_compat(
+        "ORBIT_WALLPAPER_SECONDARY", "PS3_WAVE_SECONDARY", "#BB9AF7");
+    app.colors[2] = app.target_colors[2] = environment_color_compat(
+        "ORBIT_WALLPAPER_SURFACE", "PS3_WAVE_SURFACE", "#24283B");
+    app.colors[3] = app.target_colors[3] = environment_color_compat(
+        "ORBIT_WALLPAPER_ERROR", "PS3_WAVE_ERROR", "#F7768E");
+    app.follow_system_palette = environment_bool_compat(
+        "ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE",
+        "PS3_WAVE_FOLLOW_SYSTEM_PALETTE", true);
+    app.capture_snapshots = environment_value("ORBIT_WALLPAPER_DISABLE_SNAPSHOTS", "PS3_WAVE_DISABLE_SNAPSHOTS") == NULL;
     app.snapshot_dirty = app.capture_snapshots;
-    app.debug_frames = getenv("PS3_WAVE_DEBUG_FRAMES") != NULL;
-    app.intro_duration = environment_float("PS3_WAVE_INTRO_DURATION", DEFAULT_INTRO_DURATION_SECONDS, 0.1f, 60.0f);
-    app.exit_duration = environment_float("PS3_WAVE_EXIT_DURATION", DEFAULT_EXIT_DURATION_SECONDS, 0.1f, 60.0f);
-    app.intro_peak_speed = environment_float("PS3_WAVE_INTRO_PEAK_SPEED", DEFAULT_INTRO_PEAK_SPEED, 0.01f, 1000.0f);
-    app.intro_peak_start = environment_float("PS3_WAVE_INTRO_PEAK_START", DEFAULT_INTRO_PEAK_START, 0.0f, 0.99f);
-    app.intro_peak_end = environment_float("PS3_WAVE_INTRO_PEAK_END", DEFAULT_INTRO_PEAK_END, 0.01f, 1.0f);
-    app.intro_reveal_end = environment_float("PS3_WAVE_INTRO_REVEAL_END", DEFAULT_INTRO_REVEAL_END, 0.01f, 1.0f);
-    app.intro_decay = environment_float("PS3_WAVE_INTRO_DECAY", DEFAULT_INTRO_DECAY, 0.01f, 100.0f);
-    app.auto_palette_strength_value = environment_float("PS3_WAVE_PALETTE_STRENGTH", DEFAULT_AUTO_PALETTE_STRENGTH, 0.0f, 1.0f);
-    app.peak_brightness = environment_float("PS3_WAVE_PEAK_BRIGHTNESS", DEFAULT_PEAK_BRIGHTNESS, 0.0f, 4.0f);
-    app.target_fps = environment_float("PS3_WAVE_TARGET_FPS", DEFAULT_TARGET_FPS, 1.0f, 240.0f);
-    app.render_scale = environment_float("PS3_WAVE_RENDER_SCALE", DEFAULT_RENDER_SCALE, 0.25f, 1.0f);
-    app.shader_speed = environment_float("PS3_WAVE_SPEED", DEFAULT_SHADER_SPEED, 0.0f, 4.0f);
-    app.resource_governor = environment_bool("PS3_WAVE_RESOURCE_GOVERNOR", DEFAULT_RESOURCE_GOVERNOR);
-    app.gpu_pressure_enter = environment_float("PS3_WAVE_GPU_PRESSURE_ENTER", DEFAULT_GPU_PRESSURE_ENTER, 1.0f, 100.0f);
-    app.gpu_pressure_exit = environment_float("PS3_WAVE_GPU_PRESSURE_EXIT", DEFAULT_GPU_PRESSURE_EXIT, 0.0f, 100.0f);
+    app.debug_frames = environment_value("ORBIT_WALLPAPER_DEBUG_FRAMES", "PS3_WAVE_DEBUG_FRAMES") != NULL;
+    app.intro_duration = environment_float_compat("ORBIT_WALLPAPER_INTRO_DURATION", "PS3_WAVE_INTRO_DURATION", DEFAULT_INTRO_DURATION_SECONDS, 0.1f, 60.0f);
+    app.exit_duration = environment_float_compat("ORBIT_WALLPAPER_EXIT_DURATION", "PS3_WAVE_EXIT_DURATION", DEFAULT_EXIT_DURATION_SECONDS, 0.1f, 60.0f);
+    app.intro_peak_speed = environment_float_compat("ORBIT_WALLPAPER_INTRO_PEAK_SPEED", "PS3_WAVE_INTRO_PEAK_SPEED", DEFAULT_INTRO_PEAK_SPEED, 0.01f, 1000.0f);
+    app.intro_peak_start = environment_float_compat("ORBIT_WALLPAPER_INTRO_PEAK_START", "PS3_WAVE_INTRO_PEAK_START", DEFAULT_INTRO_PEAK_START, 0.0f, 0.99f);
+    app.intro_peak_end = environment_float_compat("ORBIT_WALLPAPER_INTRO_PEAK_END", "PS3_WAVE_INTRO_PEAK_END", DEFAULT_INTRO_PEAK_END, 0.01f, 1.0f);
+    app.intro_reveal_end = environment_float_compat("ORBIT_WALLPAPER_INTRO_REVEAL_END", "PS3_WAVE_INTRO_REVEAL_END", DEFAULT_INTRO_REVEAL_END, 0.01f, 1.0f);
+    app.intro_decay = environment_float_compat("ORBIT_WALLPAPER_INTRO_DECAY", "PS3_WAVE_INTRO_DECAY", DEFAULT_INTRO_DECAY, 0.01f, 100.0f);
+    app.auto_palette_strength_value = environment_float_compat("ORBIT_WALLPAPER_PALETTE_STRENGTH", "PS3_WAVE_PALETTE_STRENGTH", DEFAULT_AUTO_PALETTE_STRENGTH, 0.0f, 1.0f);
+    app.peak_brightness = environment_float_compat("ORBIT_WALLPAPER_PEAK_BRIGHTNESS", "PS3_WAVE_PEAK_BRIGHTNESS", DEFAULT_PEAK_BRIGHTNESS, 0.0f, 4.0f);
+    app.target_fps = environment_float_compat("ORBIT_WALLPAPER_TARGET_FPS", "PS3_WAVE_TARGET_FPS", DEFAULT_TARGET_FPS, 1.0f, 240.0f);
+    app.render_scale = environment_float_compat("ORBIT_WALLPAPER_RENDER_SCALE", "PS3_WAVE_RENDER_SCALE", DEFAULT_RENDER_SCALE, 0.25f, 1.0f);
+    app.shader_speed = environment_float_compat("ORBIT_WALLPAPER_SPEED", "PS3_WAVE_SPEED", DEFAULT_SHADER_SPEED, 0.0f, 4.0f);
+    app.resource_governor = environment_bool_compat("ORBIT_WALLPAPER_RESOURCE_GOVERNOR", "PS3_WAVE_RESOURCE_GOVERNOR", DEFAULT_RESOURCE_GOVERNOR);
+    app.gpu_pressure_enter = environment_float_compat("ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", "PS3_WAVE_GPU_PRESSURE_ENTER", DEFAULT_GPU_PRESSURE_ENTER, 1.0f, 100.0f);
+    app.gpu_pressure_exit = environment_float_compat("ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", "PS3_WAVE_GPU_PRESSURE_EXIT", DEFAULT_GPU_PRESSURE_EXIT, 0.0f, 100.0f);
     if (app.gpu_pressure_exit > app.gpu_pressure_enter) {
         fprintf(stderr,
-                "PS3_WAVE_GPU_PRESSURE_EXIT must be <= PS3_WAVE_GPU_PRESSURE_ENTER; "
+                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT must be <= ORBIT_WALLPAPER_GPU_PRESSURE_ENTER; "
                 "using defaults %.0f/%.0f\n",
                 DEFAULT_GPU_PRESSURE_ENTER, DEFAULT_GPU_PRESSURE_EXIT);
         app.gpu_pressure_enter = DEFAULT_GPU_PRESSURE_ENTER;
@@ -1154,15 +1176,21 @@ int main(int argc, char **argv) {
         app.intro_peak_start = DEFAULT_INTRO_PEAK_START;
         app.intro_peak_end = DEFAULT_INTRO_PEAK_END;
     }
-    snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
+    const char *palette_path = environment_value(
+        "ORBIT_WALLPAPER_PALETTE_FILE", "PS3_WAVE_PALETTE_FILE");
+    if (palette_path && *palette_path) {
+        snprintf(app.palette_path, sizeof(app.palette_path), "%s", palette_path);
+    } else {
+        snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
+    }
     snprintf(app.snapshot_dir, sizeof(app.snapshot_dir), "%s/%s", home, DEFAULT_SNAPSHOT_RELATIVE);
-    const char *background_path = getenv("PS3_WAVE_BACKGROUND_FILE");
+    const char *background_path = environment_value("ORBIT_WALLPAPER_BACKGROUND_FILE", "PS3_WAVE_BACKGROUND_FILE");
     if (background_path && *background_path) {
         snprintf(app.background_path, sizeof(app.background_path), "%s", background_path);
     } else {
         snprintf(app.background_path, sizeof(app.background_path), "%s/%s", home, DEFAULT_BACKGROUND_RELATIVE);
     }
-    const char *control_path = getenv("PS3_WAVE_CONTROL_FILE");
+    const char *control_path = environment_value("ORBIT_WALLPAPER_CONTROL_FILE", "PS3_WAVE_CONTROL_FILE");
     if (control_path && *control_path) {
         snprintf(app.control_path, sizeof(app.control_path), "%s", control_path);
     } else {
@@ -1258,10 +1286,10 @@ int main(int argc, char **argv) {
     app.renderer_brightness = glGetUniformLocation(app.program, "u_orbit_renderer_brightness");
     read_palette(&app);
     enum animation_mode animation;
-    if (getenv("PS3_WAVE_START_HIDDEN")) {
+    if (environment_value("ORBIT_WALLPAPER_START_HIDDEN", "PS3_WAVE_START_HIDDEN")) {
         animation = ANIMATION_HIDDEN;
     } else {
-        animation = getenv("PS3_WAVE_SKIP_INTRO")
+        animation = environment_value("ORBIT_WALLPAPER_SKIP_INTRO", "PS3_WAVE_SKIP_INTRO")
             ? ANIMATION_NORMAL : ANIMATION_INTRO;
     }
     double animation_started = monotonic_seconds();

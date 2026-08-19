@@ -1,0 +1,28 @@
+[Unit]
+Description=Orbit Wallpaper Engine
+PartOf=hyprland-session.target
+After=hyprland-session.target
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p %h/.cache/orbit-wallpaper-engine
+ExecStart=%h/.local/bin/orbit-wallpaper-engine
+
+# Reloading the service means "play the intro animation again".
+# This does NOT affect normal login startup: the renderer still starts hidden
+# and waits for Quickshell to send its usual intro command.
+ExecReload=/usr/bin/sh -c '/usr/bin/printf "intro\n" > "%h/.cache/orbit-wallpaper-engine/control"'
+
+EnvironmentFile=-%h/.config/orbit-wallpaper-engine/config
+Environment=ORBIT_WALLPAPER_DISABLE_SNAPSHOTS=1
+Environment=ORBIT_WALLPAPER_SKIP_INTRO=1
+Environment=ORBIT_WALLPAPER_START_HIDDEN=1
+Environment=ORBIT_WALLPAPER_BACKGROUND_FILE=%h/.cache/orbit-wallpaper-engine/hyprlock-background.conf
+Environment=ORBIT_WALLPAPER_CONTROL_FILE=%h/.cache/orbit-wallpaper-engine/control
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+FinalKillSignal=SIGKILL
+
+[Install]
+WantedBy=hyprland-session.target

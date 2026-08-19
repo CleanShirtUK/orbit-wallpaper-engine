@@ -3,3 +3,11 @@ xdg-shell-client-protocol.h
 xdg-shell-protocol.c
 wlr-layer-shell-unstable-v1-client-protocol.h
 wlr-layer-shell-unstable-v1-protocol.c
+
+# Local build outputs
+/orbit-wallpaper-engine
+/ps3-wave-wallpaper
+
+# Local build outputs
+/orbit-wallpaper-engine
+/ps3-wave-wallpaper
