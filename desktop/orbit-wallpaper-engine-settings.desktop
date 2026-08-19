@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Orbit Wallpaper Engine
+GenericName=Wallpaper Settings
+Comment=Configure the Orbit shader wallpaper engine
+Exec=orbit-wallpaper-settings
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;Utility;
+Keywords=wallpaper;shader;wayland;hyprland;
+StartupNotify=true

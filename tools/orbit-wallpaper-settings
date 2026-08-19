@@ -1,3 +1,45 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-exec quickshell --path "${XDG_DATA_HOME:-$HOME/.local/share}/ps3-wave-wallpaper/settings/StandaloneSettings.qml"
+
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+QML="$DATA_HOME/orbit-wallpaper-engine/settings/StandaloneSettings.qml"
+
+find_quickshell() {
+    if command -v quickshell >/dev/null 2>&1; then
+        command -v quickshell
+        return 0
+    fi
+
+    for candidate in \
+        "$HOME/.local/opt/quickshell/bin/quickshell" \
+        /usr/bin/quickshell \
+        /usr/local/bin/quickshell
+    do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+if [[ ! -f "$QML" ]]; then
+    echo "Orbit Wallpaper Engine settings UI is not installed: $QML" >&2
+    exit 1
+fi
+
+if ! QS="$(find_quickshell)"; then
+    cat >&2 <<'EOF'
+Quickshell was not found.
+
+The wallpaper renderer itself does not require Quickshell. Quickshell is only
+needed for the graphical settings application.
+
+See:
+  https://quickshell.outfoxxed.me/docs/guide/install-setup/
+EOF
+    exit 127
+fi
+
+exec "$QS" --path "$QML"

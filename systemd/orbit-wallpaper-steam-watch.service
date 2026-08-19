@@ -1,0 +1,14 @@
+[Unit]
+Description=Orbit Wallpaper Engine Steam game hook
+After=orbit-wallpaper-engine.service
+Wants=orbit-wallpaper-engine.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/libexec/orbit-wallpaper-engine/orbit-wallpaper-steam-watch
+Environment=ORBIT_WALLPAPER_CONTROL_FILE=%h/.cache/orbit-wallpaper-engine/control
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
