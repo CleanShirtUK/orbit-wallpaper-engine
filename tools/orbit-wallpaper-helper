@@ -1,0 +1,683 @@
+#!/usr/bin/env python3
+"""Wallpaper-specific backend extracted from Orbit settings.
+
+Step-3 compatibility version: intentionally retains the current
+ps3-wave-wallpaper paths/service/PS3_WAVE_* configuration contract so it can
+be tested without changing the live renderer or Orbit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+HOME = Path.home()
+
+SHADER_REPO = "y4my4my4m/kde-shader-wallpaper"
+SHADER_BRANCH = "master"
+SHADER_INDEX_URL = (
+    f"https://raw.githubusercontent.com/{SHADER_REPO}/{SHADER_BRANCH}/"
+    "package/contents/ui/shader_index.json"
+)
+SHADER_RAW_BASE = (
+    f"https://raw.githubusercontent.com/{SHADER_REPO}/{SHADER_BRANCH}/"
+    "package/contents/ui/Shaders"
+)
+SHADER_THUMB_BASE = (
+    f"https://raw.githubusercontent.com/{SHADER_REPO}/{SHADER_BRANCH}/"
+    "package/contents/ui/thumbnails"
+)
+
+# Compatibility paths for this extraction stage. These are renamed later only
+# after standalone behaviour has been verified.
+SHADER_CONFIG_DIR = Path(os.environ.get(
+    "ORBIT_WALLPAPER_CONFIG_DIR",
+    HOME / ".config/ps3-wave-wallpaper",
+))
+SHADER_INSTALL_DIR = SHADER_CONFIG_DIR / "shaders"
+SHADER_RENDERER_CONFIG = SHADER_CONFIG_DIR / "config"
+SHADER_CACHE = Path(os.environ.get(
+    "ORBIT_WALLPAPER_CACHE_FILE",
+    Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache"))
+    / "orbit-wallpaper-engine/shader-catalog.json",
+))
+SHADER_SERVICE = os.environ.get(
+    "ORBIT_WALLPAPER_SERVICE",
+    "ps3-wave-wallpaper.service",
+)
+SHADER_CACHE_TTL = 6 * 60 * 60
+SHADER_HEADER_LIMIT = 16384
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Atomically replace a UTF-8 text file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+def _fetch_url(url: str, *, timeout: float = 15.0, max_bytes: int | None = None) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Orbit-Settings/1.0 (+https://github.com/y4my4my4m/kde-shader-wallpaper)",
+            "Accept": "application/json,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        if max_bytes is None:
+            return response.read()
+        return response.read(max_bytes)
+
+
+def _shader_filename(path_value: object) -> str:
+    value = str(path_value or "")
+    parsed = urllib.parse.urlparse(value)
+    path = parsed.path if parsed.scheme else value
+    filename = Path(path).name
+    if not filename.endswith(".frag") or filename != Path(filename).name:
+        return ""
+    return filename
+
+
+def _comment_field(text: str, names: tuple[str, ...]) -> str:
+    header = text[:SHADER_HEADER_LIMIT]
+    escaped = "|".join(re.escape(name) for name in names)
+
+    # Line comments: // License: CC-BY-4.0
+    match = re.search(
+        rf"(?im)^\s*//+\s*(?:{escaped})\s*:\s*(.+?)\s*$",
+        header,
+    )
+    if match:
+        return match.group(1).strip()
+
+    # Common SPDX form.
+    if "license" in {name.lower() for name in names}:
+        match = re.search(
+            r"(?im)^\s*(?://+|\*+)?\s*SPDX-License-Identifier\s*:\s*(.+?)\s*$",
+            header,
+        )
+        if match:
+            return match.group(1).strip()
+
+    # Block-comment lines: * Author: ...
+    match = re.search(
+        rf"(?im)^\s*\*+\s*(?:{escaped})\s*:\s*(.+?)\s*$",
+        header,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _normalise_license(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def _license_status(value: str) -> str:
+    """Classify an explicit shader licence without guessing missing metadata.
+
+    Returns:
+      permissive  - explicitly accepted by Orbit's allow-list
+      blocked     - explicitly restrictive / incompatible
+      unknown     - present, but not recognised confidently
+      missing     - no licence metadata in the shader source
+    """
+    if not value:
+        return "missing"
+
+    compact = re.sub(r"[\s_]+", "-", value.strip().lower())
+    compact = compact.replace("creative-commons-", "cc-")
+    compact = compact.replace("licence", "license")
+
+    denied_tokens = (
+        "noncommercial", "non-commercial", "-nc", "no-derivatives", "-nd",
+        "all-rights-reserved", "proprietary", "gpl", "agpl", "lgpl",
+        "cc-by-sa", "sharealike", "share-alike",
+    )
+    if any(token in compact for token in denied_tokens):
+        return "blocked"
+
+    allowed_patterns = (
+        r"^mit(?:-license)?(?:\b|$)",
+        r"^isc(?:-license)?(?:\b|$)",
+        r"^bsd(?:-2-clause|-3-clause)?(?:\b|$)",
+        r"^apache(?:-2(?:\.0)?|-license-2(?:\.0)?)?(?:\b|$)",
+        r"^cc0(?:-1(?:\.0)?)?(?:\b|$)",
+        r"^cc-by(?:-3(?:\.0)?|-4(?:\.0)?)?(?:\b|$)",
+        r"^unlicense(?:\b|$)",
+        r"^zlib(?:\b|$)",
+        r"^0bsd(?:\b|$)",
+    )
+    if any(re.search(pattern, compact) for pattern in allowed_patterns):
+        return "permissive"
+
+    return "unknown"
+
+
+def _shader_header_metadata(source: str, fallback_author: str = "") -> dict:
+    author = _comment_field(source, ("Author", "Credits", "Credit")) or fallback_author
+    source_url = _comment_field(source, ("Source", "URL", "Url", "url"))
+    license_name = _normalise_license(
+        _comment_field(source, ("License", "Licence"))
+    )
+    status = _license_status(license_name)
+
+    # This catalogue is a curated upstream source. Missing per-file licence
+    # metadata is allowed as "upstream-unverified", but any explicit restrictive
+    # or unknown licence remains excluded rather than guessed.
+    if status == "missing":
+        status = "upstream-unverified"
+
+    allowed = status in {"permissive", "upstream-unverified"}
+    label = license_name
+    if status == "upstream-unverified":
+        label = "Licence not declared in shader source"
+
+    return {
+        "author": author.strip(),
+        "source": source_url.strip(),
+        "license": license_name,
+        "license_label": label,
+        "license_status": status,
+        "license_allowed": allowed,
+    }
+
+
+def _shader_capabilities(index_item: dict, source: str) -> dict:
+    needs_audio = bool(index_item.get("needsAudio", False))
+    needs_textures = bool(index_item.get("needsTextures", False))
+    has_buffers = bool(index_item.get("hasBuffers", False))
+
+    uses_channels = bool(re.search(r"\biChannel[0-3]\b", source))
+    uses_mouse = bool(re.search(r"\biMouse\b", source))
+
+    # Today Orbit supports single-pass shaders without sampler/channel inputs.
+    # The KDE index is authoritative where available, but an undeclared iChannel
+    # use is treated conservatively as a texture/channel dependency.
+    channel_dependency = uses_channels and not needs_audio
+    effective_textures = needs_textures or channel_dependency
+    supported = not (needs_audio or effective_textures or has_buffers)
+
+    requirements = []
+    if needs_audio:
+        requirements.append("audio")
+    if effective_textures:
+        requirements.append("textures")
+    if has_buffers:
+        requirements.append("multipass")
+    if uses_mouse:
+        requirements.append("mouse")
+
+    return {
+        "needs_audio": needs_audio,
+        "needs_textures": effective_textures,
+        "has_buffers": has_buffers,
+        "uses_mouse": uses_mouse,
+        "uses_channels": uses_channels,
+        "supported": supported,
+        "requirements": requirements,
+    }
+
+
+def _catalog_cache_valid() -> bool:
+    try:
+        return time.time() - SHADER_CACHE.stat().st_mtime < SHADER_CACHE_TTL
+    except OSError:
+        return False
+
+
+def _read_shader_cache() -> dict | None:
+    if not _catalog_cache_valid():
+        return None
+    try:
+        value = json.loads(SHADER_CACHE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_shader_cache(value: dict) -> None:
+    SHADER_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(SHADER_CACHE, json.dumps(value, indent=2) + "\n")
+
+
+def _catalog_shader(index_item: dict) -> dict | None:
+    filename = _shader_filename(index_item.get("shaderPath"))
+    shader_id = str(index_item.get("id", "")).strip()
+    if not filename or not shader_id:
+        return None
+
+    encoded_filename = urllib.parse.quote(filename)
+    source_url = f"{SHADER_RAW_BASE}/{encoded_filename}"
+
+    try:
+        raw = _fetch_url(source_url, max_bytes=SHADER_HEADER_LIMIT)
+        source = raw.decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError):
+        return None
+
+    metadata = _shader_header_metadata(source, str(index_item.get("author", "")))
+    capabilities = _shader_capabilities(index_item, source)
+
+    thumbnail_name = Path(
+        urllib.parse.urlparse(str(index_item.get("thumbnailPath", ""))).path
+    ).name
+    thumbnail_url = (
+        f"{SHADER_THUMB_BASE}/{urllib.parse.quote(thumbnail_name)}"
+        if thumbnail_name
+        else ""
+    )
+
+    installed_path = SHADER_INSTALL_DIR / filename
+    return {
+        "id": shader_id,
+        "name": str(index_item.get("name", Path(filename).stem)),
+        "filename": filename,
+        "category": str(index_item.get("category", "Other") or "Other"),
+        "description": str(index_item.get("description", "") or ""),
+        "tags": [str(value) for value in index_item.get("tags", []) if str(value)],
+        "author": metadata["author"],
+        "source": metadata["source"],
+        "license": metadata["license"],
+        "license_label": metadata["license_label"],
+        "license_status": metadata["license_status"],
+        "license_allowed": metadata["license_allowed"],
+        "shader_url": source_url,
+        "thumbnail_url": thumbnail_url,
+        "installed": installed_path.is_file(),
+        **capabilities,
+    }
+
+
+def shader_catalog(*, refresh: bool = False, include_unlicensed: bool = False) -> dict:
+    if not refresh:
+        cached = _read_shader_cache()
+        if cached is not None:
+            if include_unlicensed:
+                return cached
+            return {
+                **cached,
+                "shaders": [
+                    item for item in cached.get("shaders", [])
+                    if item.get("license_allowed")
+                ],
+            }
+
+    try:
+        index = json.loads(_fetch_url(SHADER_INDEX_URL).decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        cached = _read_shader_cache()
+        if cached is not None:
+            cached["stale"] = True
+            cached["warning"] = f"Using cached shader catalogue: {error}"
+            if include_unlicensed:
+                return cached
+            cached["shaders"] = [
+                item for item in cached.get("shaders", [])
+                if item.get("license_allowed")
+            ]
+            return cached
+        raise ValueError(f"Could not download shader catalogue: {error}") from error
+
+    entries = index.get("shaders", []) if isinstance(index, dict) else []
+    entries = [item for item in entries if isinstance(item, dict)]
+
+    shaders = []
+    # Raw GitHub requests are independent; modest concurrency keeps first-load
+    # latency reasonable without depending on the GitHub API.
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = [executor.submit(_catalog_shader, item) for item in entries]
+        for future in as_completed(futures):
+            try:
+                item = future.result()
+            except Exception:
+                item = None
+            if item is not None:
+                shaders.append(item)
+
+    shaders.sort(key=lambda item: (item["category"].lower(), item["name"].lower()))
+    allowed_count = sum(1 for item in shaders if item.get("license_allowed"))
+    permissive_count = sum(
+        1 for item in shaders if item.get("license_status") == "permissive"
+    )
+    upstream_unverified_count = sum(
+        1 for item in shaders if item.get("license_status") == "upstream-unverified"
+    )
+    blocked_count = sum(
+        1 for item in shaders if item.get("license_status") == "blocked"
+    )
+    unknown_count = sum(
+        1 for item in shaders if item.get("license_status") == "unknown"
+    )
+    supported_count = sum(
+        1 for item in shaders
+        if item.get("license_allowed") and item.get("supported")
+    )
+
+    result = {
+        "ok": True,
+        "source": SHADER_REPO,
+        "branch": SHADER_BRANCH,
+        "fetched_at": int(time.time()),
+        "stale": False,
+        "total_upstream": len(entries),
+        "parsed": len(shaders),
+        "permissive": permissive_count,
+        "upstream_unverified": upstream_unverified_count,
+        "allowed_total": allowed_count,
+        "blocked_license": blocked_count,
+        "unknown_license": unknown_count,
+        "supported": supported_count,
+        "excluded_license": len(shaders) - allowed_count,
+        "shaders": shaders,
+    }
+    _write_shader_cache(result)
+
+    if include_unlicensed:
+        return result
+    return {
+        **result,
+        "shaders": [item for item in shaders if item.get("license_allowed")],
+    }
+
+
+def _catalog_item(shader_id: str, *, refresh: bool = False) -> dict:
+    shader_id = shader_id.strip()
+    if not shader_id:
+        raise ValueError("Shader id is required")
+    catalog = shader_catalog(refresh=refresh, include_unlicensed=True)
+    item = next(
+        (entry for entry in catalog.get("shaders", []) if entry.get("id") == shader_id),
+        None,
+    )
+    if item is None:
+        raise ValueError(f"Unknown shader id: {shader_id}")
+    return item
+
+
+def _current_renderer_shader() -> str | None:
+    try:
+        lines = SHADER_RENDERER_CONFIG.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("PS3_WAVE_SHADER="):
+            return stripped.split("=", 1)[1].strip() or None
+    return None
+
+
+def _set_renderer_shader(filename: str | None) -> None:
+    SHADER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        lines = SHADER_RENDERER_CONFIG.read_text().splitlines()
+    except OSError:
+        lines = []
+
+    output = []
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("PS3_WAVE_SHADER="):
+            if filename and not replaced:
+                output.append(f"PS3_WAVE_SHADER={filename}")
+                replaced = True
+            continue
+        output.append(line)
+
+    if filename and not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"PS3_WAVE_SHADER={filename}")
+
+    atomic_write(SHADER_RENDERER_CONFIG, "\n".join(output).rstrip() + "\n")
+
+
+def _shader_renderer_healthy(timeout: float = 2.0) -> bool:
+    """Require the renderer to remain active for several consecutive checks."""
+    deadline = time.monotonic() + timeout
+    stable = 0
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", SHADER_SERVICE],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip() == "active":
+            stable += 1
+            if stable >= 4:
+                return True
+        else:
+            stable = 0
+        time.sleep(0.15)
+    return False
+
+
+def _restart_shader_renderer(*, verify: bool = True) -> None:
+    result = subprocess.run(
+        ["systemctl", "--user", "restart", SHADER_SERVICE],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            result.stderr.strip() or f"Could not restart {SHADER_SERVICE}"
+        )
+
+    if verify and not _shader_renderer_healthy():
+        raise ValueError("Wallpaper renderer did not remain active after loading the shader")
+
+    # ExecReload is Orbit's explicit "replay intro" contract.
+    subprocess.run(
+        ["systemctl", "--user", "reload", SHADER_SERVICE],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def shader_install(
+    shader_id: str,
+    *,
+    apply: bool = False,
+    force: bool = False,
+) -> dict:
+    item = _catalog_item(shader_id)
+
+    if not item.get("license_allowed"):
+        raise ValueError(
+            f"Shader is not offered because its licence is blocked or unrecognised: "
+            f"{item.get('license') or item.get('license_status') or 'unknown'}"
+        )
+    if not item.get("supported"):
+        requirements = ", ".join(item.get("requirements", [])) or "unsupported inputs"
+        raise ValueError(f"Shader requires renderer features not yet supported: {requirements}")
+
+    try:
+        source = _fetch_url(str(item["shader_url"])).decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError) as error:
+        raise ValueError(f"Could not download shader: {error}") from error
+
+    # Re-check the downloaded file rather than trusting cached catalogue metadata.
+    metadata = _shader_header_metadata(source, str(item.get("author", "")))
+    if not metadata["license_allowed"]:
+        raise ValueError(
+            "Downloaded shader now has a blocked or unrecognised licence"
+        )
+
+    capabilities = _shader_capabilities(
+        {
+            "needsAudio": item.get("needs_audio", False),
+            "needsTextures": item.get("needs_textures", False),
+            "hasBuffers": item.get("has_buffers", False),
+        },
+        source,
+    )
+    if not capabilities["supported"]:
+        raise ValueError(
+            "Downloaded shader requires unsupported renderer features: "
+            + ", ".join(capabilities["requirements"])
+        )
+
+    SHADER_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    destination = SHADER_INSTALL_DIR / str(item["filename"])
+    if destination.exists() and not force:
+        installed = False
+    else:
+        atomic_write(destination, source)
+        installed = True
+
+    rolled_back = False
+    if apply:
+        previous_shader = _current_renderer_shader()
+        _set_renderer_shader(destination.name)
+        try:
+            _restart_shader_renderer(verify=True)
+        except Exception as error:
+            # A downloaded shader must never be able to strand the desktop with
+            # a permanently crashing wallpaper service. Restore the prior choice
+            # and bring the known-good renderer back before reporting failure.
+            _set_renderer_shader(previous_shader)
+            try:
+                _restart_shader_renderer(verify=True)
+                rolled_back = True
+            except Exception as rollback_error:
+                raise ValueError(
+                    f"Shader failed to load ({error}); rollback also failed ({rollback_error})"
+                ) from error
+            raise ValueError(
+                f"Shader failed to load and was rolled back to "
+                f"{previous_shader or 'the default shader'}: {error}"
+            ) from error
+
+    # Invalidate cache so installed flags are correct on the next browse.
+    SHADER_CACHE.unlink(missing_ok=True)
+
+    return {
+        "ok": True,
+        "id": shader_id,
+        "name": item.get("name", destination.stem),
+        "filename": destination.name,
+        "path": str(destination),
+        # "installed" describes post-operation state. "wrote_file" says
+        # whether this invocation actually created/replaced the shader file.
+        "installed": destination.exists(),
+        "wrote_file": installed,
+        "applied": apply,
+        "license": metadata["license"],
+        "license_label": metadata["license_label"],
+        "license_status": metadata["license_status"],
+        "author": metadata["author"],
+        "source": metadata["source"],
+    }
+
+def renderer_status() -> dict:
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", SHADER_SERVICE],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "ok": True,
+        "service": SHADER_SERVICE,
+        "status": result.stdout.strip() or "unknown",
+        "active": result.stdout.strip() == "active",
+    }
+
+
+def renderer_restart(*, replay_intro: bool = True) -> dict:
+    _restart_shader_renderer(verify=True)
+    if not replay_intro:
+        # _restart_shader_renderer currently replays intro to preserve the
+        # existing Orbit contract. A no-intro mode can be separated later.
+        pass
+    return {"ok": True, **renderer_status()}
+
+
+def renderer_intro() -> dict:
+    result = subprocess.run(
+        ["systemctl", "--user", "reload", SHADER_SERVICE],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            result.stderr.strip() or f"Could not reload {SHADER_SERVICE}"
+        )
+    return {"ok": True, "service": SHADER_SERVICE}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="orbit-wallpaper-helper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    catalog_parser = subparsers.add_parser("shader-catalog")
+    catalog_parser.add_argument("--refresh", action="store_true")
+    catalog_parser.add_argument("--include-unlicensed", action="store_true")
+
+    install_parser = subparsers.add_parser("shader-install")
+    install_parser.add_argument("shader_id")
+    install_parser.add_argument("--apply", action="store_true")
+    install_parser.add_argument("--force", action="store_true")
+
+    subparsers.add_parser("renderer-status")
+    subparsers.add_parser("renderer-restart")
+    subparsers.add_parser("renderer-intro")
+
+    args = parser.parse_args()
+    try:
+        if args.command == "shader-catalog":
+            value = shader_catalog(
+                refresh=args.refresh,
+                include_unlicensed=args.include_unlicensed,
+            )
+        elif args.command == "shader-install":
+            value = shader_install(
+                args.shader_id,
+                apply=args.apply,
+                force=args.force,
+            )
+        elif args.command == "renderer-status":
+            value = renderer_status()
+        elif args.command == "renderer-restart":
+            value = renderer_restart()
+        else:
+            value = renderer_intro()
+        print(json.dumps(value))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

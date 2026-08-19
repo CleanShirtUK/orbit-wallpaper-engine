@@ -1,0 +1,1450 @@
+import Quickshell
+import Quickshell.Io
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Dialogs
+
+Item {
+    id: root
+
+    property var themeData: ({
+        uiFont: "Sans Serif",
+        colors: ({
+            text: "#c0caf5",
+            text_muted: "#9aa5ce",
+            surface: "#24283b",
+            surface_selected: "#333954",
+            accent: "#7aa2f7",
+            border: "#3d4355",
+            error: "#f7768e",
+            success: "#9ece6a",
+            warning: "#e0af68"
+        })
+    })
+    property var previewStyle: ({ corner_radius: 10 })
+    property string helperPath: Quickshell.env("HOME") + "/.local/bin/orbit-wallpaper-helper"
+    property string wallpaperServiceStatus: "unknown"
+
+    function textColor() { return themeData.colors.text || "#c0caf5" }
+    function mutedColor() { return themeData.colors.text_muted || "#9aa5ce" }
+    function surfaceColor() { return themeData.colors.surface || "#24283b" }
+    function selectedColor() { return themeData.colors.surface_selected || "#333954" }
+    function accentColor() { return themeData.colors.accent || "#7aa2f7" }
+    function previewColor(key, fallback) { return themeData.colors[key] || fallback }
+
+    component WallpaperButton: Rectangle {
+        id: control
+
+        // Compatibility with Orbit.OrbitButton call sites in the extracted
+        // page. The standalone control defaults to the host theme, but accepts
+        // an explicit themeData assignment exactly like the Orbit component.
+        property var themeData: root.themeData
+        property alias text: label.text
+        property bool compact: false
+        property bool subtle: false
+        property bool highlighted: false
+        property bool enabled: true
+        signal clicked()
+
+        readonly property real horizontalPadding: compact ? 12 : 16
+        readonly property real controlHeight: compact ? 30 : 36
+
+        implicitWidth: Math.max(72, label.implicitWidth + horizontalPadding * 2)
+        implicitHeight: controlHeight
+        width: implicitWidth
+        height: implicitHeight
+        radius: Math.max(6, Number(root.previewStyle.corner_radius || 10) * 0.75)
+
+        opacity: enabled ? 1.0 : 0.45
+        color: {
+            if (highlighted)
+                return Qt.alpha(root.accentColor(), hover.containsMouse ? 0.34 : 0.24)
+            if (subtle)
+                return hover.containsMouse
+                    ? Qt.alpha(root.surfaceColor(), 0.82)
+                    : Qt.alpha(root.surfaceColor(), 0.48)
+            return hover.containsMouse
+                ? Qt.alpha(root.selectedColor(), 0.92)
+                : Qt.alpha(root.surfaceColor(), 0.72)
+        }
+
+        border.width: highlighted ? 1 : 0
+        border.color: highlighted ? Qt.alpha(root.accentColor(), 0.72) : "transparent"
+
+        Text {
+            id: label
+            anchors.centerIn: parent
+            color: root.textColor()
+            font.family: control.themeData.uiFont || root.themeData.uiFont
+            font.pixelSize: control.compact ? 10 : 11
+            font.bold: control.highlighted
+        }
+
+        MouseArea {
+            id: hover
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: control.enabled
+            cursorShape: Qt.PointingHandCursor
+            onClicked: control.clicked()
+        }
+
+        Behavior on color {
+            ColorAnimation { duration: 100 }
+        }
+    }
+
+    component FastWheelHandler: WheelHandler {
+        required property Flickable scroller
+        target: null
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+        onWheel: function(event) {
+            var maximum = Math.max(0, scroller.contentHeight - scroller.height)
+            if (maximum <= 0) {
+                event.accepted = false
+                return
+            }
+
+            var movement = 0
+            if (event.angleDelta.y !== 0)
+                movement = event.angleDelta.y > 0 ? 36 : -36
+            else if (event.pixelDelta.y !== 0)
+                movement = event.pixelDelta.y * 1.5
+
+            if (movement === 0) {
+                event.accepted = false
+                return
+            }
+
+            scroller.cancelFlick()
+            scroller.contentY = Math.max(
+                0,
+                Math.min(maximum, scroller.contentY - movement)
+            )
+            event.accepted = true
+        }
+    }
+
+    function refreshRendererStatus() {
+        if (!standaloneStatusProcess.running)
+            standaloneStatusProcess.running = true
+    }
+
+    function restartRenderer() {
+        if (!standaloneRestartProcess.running)
+            standaloneRestartProcess.running = true
+    }
+
+    Process {
+        id: standaloneStatusProcess
+        command: [root.helperPath, "renderer-status"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var value = JSON.parse(text)
+                    root.wallpaperServiceStatus = value.status || "unknown"
+                } catch (error) {
+                    root.wallpaperServiceStatus = "unknown"
+                }
+            }
+        }
+    }
+
+    Process {
+        id: standaloneRestartProcess
+        command: [root.helperPath, "renderer-restart"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var value = JSON.parse(text)
+                    root.wallpaperServiceStatus =
+                        value.status || root.wallpaperServiceStatus
+                } catch (error) {}
+            }
+        }
+        onExited: root.refreshRendererStatus()
+    }
+
+    Component.onCompleted: refreshRendererStatus()
+
+        Item {
+    id: wallpaperRoot
+    anchors.fill: parent
+
+        property string configPath: Quickshell.env("HOME") + "/.config/ps3-wave-wallpaper/config"
+        property string shaderDirectory: Quickshell.env("HOME") + "/.config/ps3-wave-wallpaper/shaders"
+        property var shaderFiles: ["wave.frag (default)"]
+        property string selectedShader: ""
+        property real introDuration: 4.5
+        property real exitDuration: 1.0
+        property real introPeakSpeed: 34.0
+        property real introPeakStart: 0.05
+        property real introPeakEnd: 0.08
+        property real introRevealEnd: 0.22
+        property real introDecay: 10.0
+        property real paletteStrength: 0.72
+        property real peakBrightness: 1.0
+
+        function brightnessToSlider(value) {
+            value = Math.max(0.0, Math.min(4.0, Number(value)))
+            if (value <= 1.0)
+                return value * 0.75
+            return 0.75 + ((value - 1.0) / 3.0) * 0.25
+        }
+
+        function sliderToBrightness(position) {
+            position = Math.max(0.0, Math.min(1.0, Number(position)))
+            if (position <= 0.75)
+                return position / 0.75
+            return 1.0 + ((position - 0.75) / 0.25) * 3.0
+        }
+
+        function roundedBrightness(value) {
+            if (value <= 1.0)
+                return Math.round(value * 100.0) / 100.0
+            return Math.round(value * 10.0) / 10.0
+        }
+        property real targetFps: 60.0
+        property real renderScale: 1.0
+        property real shaderSpeed: 1.0
+        property bool resourceGovernor: true
+        property real gpuPressureEnter: 75.0
+        property real gpuPressureExit: 45.0
+        property bool configLoaded: false
+        property bool wallpaperDirty: false
+        property string wallpaperStatusText: ""
+        property bool shaderBrowserVisible: false
+        property bool shaderCatalogLoading: false
+        property string shaderCatalogError: ""
+        property var shaderCatalog: []
+        property var selectedCatalogShader: null
+
+        function parseConfig(text) {
+            var values = ({})
+            var lines = String(text).split("\n")
+            for (var i = 0; i < lines.length; ++i) {
+                var line = lines[i].trim()
+                if (!line || line[0] === "#")
+                    continue
+                var separator = line.indexOf("=")
+                if (separator < 1)
+                    continue
+                values[line.substring(0, separator).trim()] = line.substring(separator + 1).trim()
+            }
+
+            function numberValue(key, fallback) {
+                var value = Number(values[key])
+                return isFinite(value) ? value : fallback
+            }
+
+            function boolValue(key, fallback) {
+                if (values[key] === undefined)
+                    return fallback
+                var value = String(values[key]).trim().toLowerCase()
+                if (["1", "true", "yes", "on"].indexOf(value) >= 0)
+                    return true
+                if (["0", "false", "no", "off"].indexOf(value) >= 0)
+                    return false
+                return fallback
+            }
+
+            introDuration = numberValue("PS3_WAVE_INTRO_DURATION", 4.5)
+            exitDuration = numberValue("PS3_WAVE_EXIT_DURATION", 1.0)
+            introPeakSpeed = numberValue("PS3_WAVE_INTRO_PEAK_SPEED", 34.0)
+            introPeakStart = numberValue("PS3_WAVE_INTRO_PEAK_START", 0.05)
+            introPeakEnd = numberValue("PS3_WAVE_INTRO_PEAK_END", 0.08)
+            introRevealEnd = numberValue("PS3_WAVE_INTRO_REVEAL_END", 0.22)
+            introDecay = numberValue("PS3_WAVE_INTRO_DECAY", 10.0)
+            paletteStrength = numberValue("PS3_WAVE_PALETTE_STRENGTH", 0.72)
+            peakBrightness = numberValue("PS3_WAVE_PEAK_BRIGHTNESS", 1.0)
+            targetFps = numberValue("PS3_WAVE_TARGET_FPS", 60.0)
+            renderScale = numberValue("PS3_WAVE_RENDER_SCALE", 1.0)
+            shaderSpeed = numberValue("PS3_WAVE_SPEED", 1.0)
+            resourceGovernor = boolValue("PS3_WAVE_RESOURCE_GOVERNOR", true)
+            gpuPressureEnter = numberValue("PS3_WAVE_GPU_PRESSURE_ENTER", 75.0)
+            gpuPressureExit = numberValue("PS3_WAVE_GPU_PRESSURE_EXIT", 45.0)
+            selectedShader = values["PS3_WAVE_SHADER"] || ""
+            wallpaperDirty = false
+            configLoaded = true
+        }
+
+        function parseShaders(text) {
+            var files = ["wave.frag (default)"]
+            var lines = String(text).split("\n")
+            for (var i = 0; i < lines.length; ++i) {
+                var file = lines[i].trim()
+                if (file && files.indexOf(file) < 0)
+                    files.push(file)
+            }
+            shaderFiles = files
+        }
+
+        function markDirty() {
+            if (configLoaded)
+                wallpaperDirty = true
+        }
+
+        function shaderIndex() {
+            if (!selectedShader)
+                return 0
+            var index = shaderFiles.indexOf(selectedShader)
+            return index < 0 ? 0 : index
+        }
+
+        function filteredCatalog(query) {
+            var needle = String(query || "").trim().toLowerCase()
+            if (!needle)
+                return shaderCatalog
+            var output = []
+            for (var i = 0; i < shaderCatalog.length; ++i) {
+                var item = shaderCatalog[i]
+                var haystack = [
+                    item.name || "",
+                    item.author || "",
+                    item.category || "",
+                    item.license || "",
+                    (item.tags || []).join(" ")
+                ].join(" ").toLowerCase()
+                if (haystack.indexOf(needle) >= 0)
+                    output.push(item)
+            }
+            return output
+        }
+
+        function openShaderBrowser() {
+            shaderBrowserVisible = true
+            shaderCatalogError = ""
+            if (!shaderCatalog.length && !shaderCatalogProcess.running) {
+                shaderCatalogLoading = true
+                shaderCatalogProcess.command = [
+                    root.helperPath,
+                    "shader-catalog"
+                ]
+                shaderCatalogProcess.running = true
+            }
+        }
+
+        function refreshShaderCatalog() {
+            if (shaderCatalogProcess.running)
+                return
+            shaderCatalogLoading = true
+            shaderCatalogError = ""
+            shaderCatalogProcess.command = [
+                root.helperPath,
+                "shader-catalog",
+                "--refresh"
+            ]
+            shaderCatalogProcess.running = true
+        }
+
+        function installCatalogShader(item) {
+            if (!item || shaderInstallProcess.running)
+                return
+            selectedCatalogShader = item
+            shaderCatalogError = ""
+            shaderInstallProcess.command = [
+                root.helperPath,
+                "shader-install",
+                String(item.id),
+                "--apply"
+            ]
+            shaderInstallProcess.running = true
+        }
+
+        function reloadConfig() {
+            wallpaperStatusText = "Loading…"
+            loadWallpaperConfig.running = true
+            listWallpaperShaders.running = true
+        }
+
+        function replayIntro() {
+            if (replayIntroProcess.running)
+                return
+            wallpaperStatusText = "Replaying intro…"
+            replayIntroProcess.running = true
+        }
+
+        function saveConfig() {
+            if (saveWallpaperConfig.running)
+                return
+
+            wallpaperStatusText = "Saving…"
+
+            var values = [
+                "PS3_WAVE_INTRO_DURATION=" + Number(introDuration).toFixed(3),
+                "PS3_WAVE_EXIT_DURATION=" + Number(exitDuration).toFixed(3),
+                "PS3_WAVE_INTRO_PEAK_SPEED=" + Number(introPeakSpeed).toFixed(3),
+                "PS3_WAVE_INTRO_PEAK_START=" + Number(introPeakStart).toFixed(3),
+                "PS3_WAVE_INTRO_PEAK_END=" + Number(introPeakEnd).toFixed(3),
+                "PS3_WAVE_INTRO_REVEAL_END=" + Number(introRevealEnd).toFixed(3),
+                "PS3_WAVE_INTRO_DECAY=" + Number(introDecay).toFixed(3),
+                "PS3_WAVE_PALETTE_STRENGTH=" + Number(paletteStrength).toFixed(3),
+                "PS3_WAVE_PEAK_BRIGHTNESS=" + Number(peakBrightness).toFixed(3),
+                "PS3_WAVE_TARGET_FPS=" + Number(targetFps).toFixed(1),
+                "PS3_WAVE_RENDER_SCALE=" + Number(renderScale).toFixed(2),
+                "PS3_WAVE_SPEED=" + Number(shaderSpeed).toFixed(2),
+                "PS3_WAVE_RESOURCE_GOVERNOR=" + (resourceGovernor ? "1" : "0"),
+                "PS3_WAVE_GPU_PRESSURE_ENTER=" + Number(gpuPressureEnter).toFixed(0),
+                "PS3_WAVE_GPU_PRESSURE_EXIT=" + Number(gpuPressureExit).toFixed(0)
+            ]
+
+            if (selectedShader)
+                values.push("PS3_WAVE_SHADER=" + selectedShader)
+
+            saveWallpaperConfig.command = [
+                "/usr/bin/python3",
+                "-c",
+                "import os,sys,tempfile\n"
+                + "path=sys.argv[1]\n"
+                + "updates=dict(x.split('=',1) for x in sys.argv[2:])\n"
+                + "managed=set(updates)|{'PS3_WAVE_SHADER'}\n"
+                + "try:\n"
+                + "    old=open(path,encoding='utf-8').read().splitlines()\n"
+                + "except FileNotFoundError:\n"
+                + "    old=[]\n"
+                + "out=[]; seen=set()\n"
+                + "for line in old:\n"
+                + "    raw=line.strip()\n"
+                + "    key=raw.split('=',1)[0] if '=' in raw and not raw.startswith('#') else None\n"
+                + "    if key in managed:\n"
+                + "        if key in updates and key not in seen:\n"
+                + "            out.append(key+'='+updates[key]); seen.add(key)\n"
+                + "        continue\n"
+                + "    out.append(line)\n"
+                + "for key,value in updates.items():\n"
+                + "    if key not in seen: out.append(key+'='+value)\n"
+                + "os.makedirs(os.path.dirname(path),exist_ok=True)\n"
+                + "fd,tmp=tempfile.mkstemp(prefix='.config.',dir=os.path.dirname(path),text=True)\n"
+                + "with os.fdopen(fd,'w',encoding='utf-8') as f:\n"
+                + "    f.write('\\n'.join(out).rstrip()+'\\n')\n"
+                + "os.replace(tmp,path)\n",
+                configPath
+            ].concat(values)
+
+            saveWallpaperConfig.running = true
+        }
+
+        Component.onCompleted: reloadConfig()
+
+        Process {
+            id: shaderCatalogProcess
+            running: false
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    wallpaperRoot.shaderCatalogLoading = false
+                    try {
+                        var value = JSON.parse(text)
+                        if (value.ok === false)
+                            throw new Error(value.error || "Could not load shader catalogue")
+                        wallpaperRoot.shaderCatalog = value.shaders || []
+                        wallpaperRoot.shaderCatalogError = ""
+                        if (wallpaperRoot.selectedCatalogShader) {
+                            var selectedId = wallpaperRoot.selectedCatalogShader.id
+                            wallpaperRoot.selectedCatalogShader = null
+                            for (var i = 0; i < wallpaperRoot.shaderCatalog.length; ++i) {
+                                if (wallpaperRoot.shaderCatalog[i].id === selectedId) {
+                                    wallpaperRoot.selectedCatalogShader = wallpaperRoot.shaderCatalog[i]
+                                    break
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        wallpaperRoot.shaderCatalogError = error.message
+                    }
+                }
+            }
+            onExited: function(exitCode) {
+                wallpaperRoot.shaderCatalogLoading = false
+                if (exitCode !== 0 && !wallpaperRoot.shaderCatalogError)
+                    wallpaperRoot.shaderCatalogError = "Could not load shader catalogue."
+            }
+        }
+
+        Process {
+            id: shaderInstallProcess
+            running: false
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        var value = JSON.parse(text)
+                        if (value.ok === false)
+                            throw new Error(value.error || "Shader installation failed")
+                        wallpaperRoot.wallpaperStatusText =
+                            value.applied ? "Installed and applied " + value.name + "." : "Installed " + value.name + "."
+                        wallpaperRoot.shaderCatalogError = ""
+                        wallpaperRoot.reloadConfig()
+                        wallpaperRoot.refreshShaderCatalog()
+                    } catch (error) {
+                        wallpaperRoot.shaderCatalogError = error.message
+                    }
+                }
+            }
+            onExited: function(exitCode) {
+                if (exitCode !== 0 && !wallpaperRoot.shaderCatalogError)
+                    wallpaperRoot.shaderCatalogError = "Shader installation failed."
+            }
+        }
+
+        Process {
+            id: loadWallpaperConfig
+            command: ["/usr/bin/sh", "-c", "cat \"$1\" 2>/dev/null || true", "sh", wallpaperRoot.configPath]
+            running: false
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    wallpaperRoot.parseConfig(text)
+                    wallpaperRoot.wallpaperStatusText = ""
+                }
+            }
+        }
+
+        Process {
+            id: listWallpaperShaders
+            command: ["/usr/bin/sh", "-c",
+                "d=\"$1\"; [ -d \"$d\" ] || exit 0; "
+                + "find \"$d\" -maxdepth 1 -type f -name '*.frag' -printf '%f\\n' | sort",
+                "sh", wallpaperRoot.shaderDirectory]
+            running: false
+            stdout: StdioCollector {
+                onStreamFinished: wallpaperRoot.parseShaders(text)
+            }
+        }
+
+        Process {
+            id: saveWallpaperConfig
+            running: false
+            stdout: StdioCollector {}
+            onExited: function(exitCode) {
+                if (exitCode !== 0) {
+                    wallpaperRoot.wallpaperStatusText = "Could not save wallpaper settings."
+                    return
+                }
+                wallpaperRoot.wallpaperDirty = false
+                wallpaperRoot.wallpaperStatusText = "Restarting renderer…"
+                applyWallpaperProcess.running = true
+            }
+        }
+
+        Process {
+            id: applyWallpaperProcess
+            command: ["/usr/bin/sh", "-c",
+                "systemctl --user restart ps3-wave-wallpaper.service"
+                + " && sleep 0.15"
+                + " && systemctl --user reload ps3-wave-wallpaper.service"]
+            running: false
+            stdout: StdioCollector {}
+            onExited: function(exitCode) {
+                wallpaperRoot.wallpaperStatusText = exitCode === 0
+                    ? "Wallpaper settings applied."
+                    : "Wallpaper renderer restart failed."
+                wallpaperRoot.reloadConfig()
+            }
+        }
+
+        Process {
+            id: replayIntroProcess
+            command: ["/usr/bin/systemctl", "--user", "reload", "ps3-wave-wallpaper.service"]
+            running: false
+            stdout: StdioCollector {}
+            onExited: function(exitCode) {
+                wallpaperRoot.wallpaperStatusText = exitCode === 0
+                    ? "Intro replayed."
+                    : "Could not replay intro."
+            }
+        }
+
+        Column {
+            id: wallpaperColumn
+            width: parent.width
+            spacing: 10
+
+            
+
+            Item {
+                width: parent.width
+                height: 130
+
+                Column {
+                    anchors.fill: parent
+                    spacing: 9
+
+                    Row {
+                        width: parent.width
+                        spacing: 10
+
+                        Text {
+                            text: "Shader"
+                            width: 112
+                            color: textColor()
+                            font.family: themeData.uiFont
+                            font.pixelSize: 11
+                            font.bold: true
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        ComboBox {
+                            width: parent.width - 112 - shaderBrowseButton.implicitWidth - 20
+                            model: wallpaperRoot.shaderFiles
+                            currentIndex: wallpaperRoot.shaderIndex()
+                            onActivated: {
+                                wallpaperRoot.selectedShader = currentIndex === 0 ? "" : currentText
+                                wallpaperRoot.markDirty()
+                            }
+                        }
+
+                        WallpaperButton {
+                            id: shaderBrowseButton
+                            themeData: root.themeData
+                            compact: true
+                            text: "Browse shaders…"
+                            highlighted: true
+                            onClicked: wallpaperRoot.openShaderBrowser()
+                        }
+                    }
+
+                    Row {
+                        width: parent.width
+                        height: 32
+                        spacing: 20
+
+                        Row {
+                            width: (parent.width - 20) / 2
+                            height: parent.height
+                            spacing: 8
+
+                            Text {
+                                text: "Palette strength"
+                                width: 104
+                                color: mutedColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 10
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Slider {
+                                width: parent.width - 104 - 44 - 16
+                                from: 0.0
+                                to: 1.0
+                                stepSize: 0.01
+                                value: wallpaperRoot.paletteStrength
+                                anchors.verticalCenter: parent.verticalCenter
+                                onMoved: {
+                                    wallpaperRoot.paletteStrength = Math.round(value * 100) / 100
+                                    wallpaperRoot.markDirty()
+                                }
+                            }
+
+                            Text {
+                                width: 44
+                                text: Number(wallpaperRoot.paletteStrength).toFixed(2)
+                                color: textColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 9
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+
+                        Row {
+                            width: (parent.width - 20) / 2
+                            height: parent.height
+                            spacing: 8
+
+                            Text {
+                                text: "Peak brightness"
+                                width: 104
+                                color: mutedColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 10
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Slider {
+                                width: parent.width - 104 - 44 - 16
+                                from: 0.0
+                                to: 1.0
+                                stepSize: 0.005
+                                value: wallpaperRoot.brightnessToSlider(wallpaperRoot.peakBrightness)
+                                anchors.verticalCenter: parent.verticalCenter
+                                onMoved: {
+                                    wallpaperRoot.peakBrightness =
+                                        wallpaperRoot.roundedBrightness(
+                                            wallpaperRoot.sliderToBrightness(value))
+                                    wallpaperRoot.markDirty()
+                                }
+                            }
+
+                            Text {
+                                width: 44
+                                text: Number(wallpaperRoot.peakBrightness).toFixed(2) + "×"
+                                color: textColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 9
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Installed shaders are loaded from ~/.config/ps3-wave-wallpaper/shaders."
+                        color: mutedColor()
+                        font.family: themeData.uiFont
+                        font.pixelSize: 9
+                        width: parent.width
+                        elide: Text.ElideRight
+                    }
+                }
+            }
+
+            Item {
+                width: parent.width
+                height: 116
+
+                Column {
+                    anchors.fill: parent
+                    spacing: 7
+
+                    Row {
+                        width: parent.width
+                        height: 22
+
+                        Text {
+                            text: "Performance"
+                            color: textColor()
+                            font.family: themeData.uiFont
+                            font.pixelSize: 11
+                            font.bold: true
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Item {
+                            width: Math.max(1, parent.width - 230)
+                            height: 1
+                        }
+
+                        CheckBox {
+                            text: "Resource governor"
+                            checked: wallpaperRoot.resourceGovernor
+                            anchors.verticalCenter: parent.verticalCenter
+                            onToggled: {
+                                wallpaperRoot.resourceGovernor = checked
+                                wallpaperRoot.markDirty()
+                            }
+                        }
+                    }
+
+                    // Primary performance controls form one balanced row.
+                    Grid {
+                        id: primaryPerformanceGrid
+                        width: parent.width
+                        columns: 3
+                        columnSpacing: 14
+
+                        Repeater {
+                            model: [
+                                ["Speed", "shaderSpeed", 0.0, 4.0, 0.05, "×", 2],
+                                ["Target FPS", "targetFps", 10.0, 120.0, 1.0, " fps", 0],
+                                ["Render scale", "renderScale", 0.25, 1.0, 0.05, "×", 2]
+                            ]
+
+                            delegate: Item {
+                                required property var modelData
+                                width: (primaryPerformanceGrid.width
+                                    - primaryPerformanceGrid.columnSpacing * 2) / 3
+                                height: 36
+
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    text: modelData[0]
+                                    color: mutedColor()
+                                    font.family: themeData.uiFont
+                                    font.pixelSize: 9
+                                }
+
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    text: Number(wallpaperRoot[modelData[1]])
+                                        .toFixed(Number(modelData[6])) + modelData[5]
+                                    color: textColor()
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: 9
+                                }
+
+                                Slider {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 18
+                                    from: Number(modelData[2])
+                                    to: Number(modelData[3])
+                                    stepSize: Number(modelData[4])
+                                    value: Number(wallpaperRoot[modelData[1]])
+                                    onMoved: {
+                                        wallpaperRoot[modelData[1]] =
+                                            Math.round(value / stepSize) * stepSize
+                                        wallpaperRoot.markDirty()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Governor hysteresis stays compact and visually secondary.
+                    Row {
+                        width: parent.width
+                        height: 36
+                        spacing: 14
+                        opacity: wallpaperRoot.resourceGovernor ? 1.0 : 0.45
+
+                        Item {
+                            width: (parent.width - 14) / 2
+                            height: parent.height
+
+                            Text {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                text: "GPU freeze"
+                                color: mutedColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 9
+                            }
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                text: Number(wallpaperRoot.gpuPressureEnter).toFixed(0) + "%"
+                                color: textColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 9
+                            }
+
+                            Slider {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 18
+                                from: 25
+                                to: 100
+                                stepSize: 1
+                                value: wallpaperRoot.gpuPressureEnter
+                                enabled: wallpaperRoot.resourceGovernor
+                                onMoved: {
+                                    wallpaperRoot.gpuPressureEnter = Math.round(value)
+                                    if (wallpaperRoot.gpuPressureExit
+                                            > wallpaperRoot.gpuPressureEnter)
+                                        wallpaperRoot.gpuPressureExit =
+                                            wallpaperRoot.gpuPressureEnter
+                                    wallpaperRoot.markDirty()
+                                }
+                            }
+                        }
+
+                        Item {
+                            width: (parent.width - 14) / 2
+                            height: parent.height
+
+                            Text {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                text: "GPU resume"
+                                color: mutedColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 9
+                            }
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                text: Number(wallpaperRoot.gpuPressureExit).toFixed(0) + "%"
+                                color: textColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 9
+                            }
+
+                            Slider {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 18
+                                from: 0
+                                to: 95
+                                stepSize: 1
+                                value: wallpaperRoot.gpuPressureExit
+                                enabled: wallpaperRoot.resourceGovernor
+                                onMoved: {
+                                    wallpaperRoot.gpuPressureExit = Math.round(value)
+                                    if (wallpaperRoot.gpuPressureExit
+                                            > wallpaperRoot.gpuPressureEnter)
+                                        wallpaperRoot.gpuPressureEnter =
+                                            wallpaperRoot.gpuPressureExit
+                                    wallpaperRoot.markDirty()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Item {
+                width: parent.width
+                height: 158
+
+                Column {
+                    anchors.fill: parent
+                    spacing: 8
+
+                    Row {
+                        width: parent.width
+
+                        Column {
+                            width: parent.width - 120
+                            spacing: 2
+
+                            Text {
+                                text: "Startup animation"
+                                color: textColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 11
+                                font.bold: true
+                            }
+
+                            Text {
+                                text: "Timing and motion used when Orbit reveals the wallpaper."
+                                color: mutedColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 9
+                            }
+                        }
+
+                        WallpaperButton {
+                            themeData: root.themeData
+                            compact: true
+                            subtle: true
+                            text: "Reset values"
+                            onClicked: {
+                                wallpaperRoot.introDuration = 4.5
+                                wallpaperRoot.exitDuration = 1.0
+                                wallpaperRoot.introPeakSpeed = 34.0
+                                wallpaperRoot.introPeakStart = 0.05
+                                wallpaperRoot.introPeakEnd = 0.08
+                                wallpaperRoot.introRevealEnd = 0.22
+                                wallpaperRoot.introDecay = 10.0
+                                wallpaperRoot.markDirty()
+                            }
+                        }
+                    }
+
+                    Grid {
+                        id: animationGrid
+                        width: parent.width
+                        columns: 3
+                        columnSpacing: 14
+                        rowSpacing: 4
+
+                        Repeater {
+                            model: [
+                                ["Duration", "introDuration", 0.1, 15.0, 0.1, " s"],
+                                ["Exit duration", "exitDuration", 0.1, 10.0, 0.1, " s"],
+                                ["Peak speed", "introPeakSpeed", 0.01, 100.0, 0.25, "×"],
+                                ["Peak start", "introPeakStart", 0.0, 0.99, 0.01, ""],
+                                ["Peak end", "introPeakEnd", 0.01, 1.0, 0.01, ""],
+                                ["Reveal end", "introRevealEnd", 0.01, 1.0, 0.01, ""],
+                                ["Decay", "introDecay", 0.01, 30.0, 0.1, ""]
+                            ]
+
+                            delegate: Item {
+                                required property var modelData
+                                width: (animationGrid.width
+                                    - animationGrid.columnSpacing * 2) / 3
+                                height: 38
+
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    text: modelData[0]
+                                    color: mutedColor()
+                                    font.family: themeData.uiFont
+                                    font.pixelSize: 9
+                                }
+
+                                Text {
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    text: Number(wallpaperRoot[modelData[1]]).toFixed(2) + modelData[5]
+                                    color: textColor()
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: 9
+                                }
+
+                                Slider {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 20
+                                    from: Number(modelData[2])
+                                    to: Number(modelData[3])
+                                    stepSize: Number(modelData[4])
+                                    value: Number(wallpaperRoot[modelData[1]])
+                                    onMoved: {
+                                        var stepped = Math.round(value / stepSize) * stepSize
+                                        wallpaperRoot[modelData[1]] = stepped
+                                        wallpaperRoot.markDirty()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            // Compact renderer status bar. The page title/description already live
+            // in the Settings shell, so don't repeat them here.
+            Item {
+                width: parent.width
+                height: 58
+
+                Row {
+                    anchors.fill: parent
+                    spacing: 10
+
+                    Column {
+                        width: 210
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 3
+
+                        Text {
+                            text: "Shader renderer"
+                            color: accentColor()
+                            font.family: themeData.uiFont
+                            font.pixelSize: 11
+                            font.bold: true
+                        }
+
+                        Text {
+                            text: (wallpaperRoot.selectedShader || "wave.frag")
+                                + "  •  "
+                                + root.wallpaperServiceStatus
+                                + (wallpaperRoot.wallpaperStatusText
+                                    ? "  •  " + wallpaperRoot.wallpaperStatusText
+                                    : "")
+                            color: root.wallpaperServiceStatus === "active"
+                                ? (themeData.colors.success || "#9ece6a")
+                                : mutedColor()
+                            font.family: "JetBrains Mono"
+                            font.pixelSize: 9
+                            elide: Text.ElideRight
+                            width: parent.width
+                        }
+                    }
+
+                    Item {
+                        width: Math.max(1, parent.width
+                            - 210
+                            - replayIntroButton.implicitWidth
+                            - applyWallpaperButton.implicitWidth
+                            - restartServiceButton.implicitWidth
+                            - 40)
+                        height: 1
+                    }
+
+                    WallpaperButton {
+                        id: replayIntroButton
+                        themeData: root.themeData
+                        compact: true
+                        text: "Replay intro"
+                        enabled: root.wallpaperServiceStatus === "active"
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: wallpaperRoot.replayIntro()
+                    }
+
+                    WallpaperButton {
+                        id: applyWallpaperButton
+                        themeData: root.themeData
+                        compact: true
+                        highlighted: true
+                        text: "Apply"
+                        enabled: wallpaperRoot.wallpaperDirty
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: wallpaperRoot.saveConfig()
+                    }
+
+                    WallpaperButton {
+                        id: restartServiceButton
+                        themeData: root.themeData
+                        compact: true
+                        text: root.wallpaperServiceStatus === "active"
+                            ? "Restart Renderer"
+                            : "Start Renderer"
+                        highlighted: root.wallpaperServiceStatus !== "active"
+                        anchors.verticalCenter: parent.verticalCenter
+                        onClicked: root.restartRenderer()
+                    }
+
+                }
+            }
+    }
+
+        Rectangle {
+            id: shaderBrowserOverlay
+            anchors.fill: parent
+            z: 100
+            visible: wallpaperRoot.shaderBrowserVisible
+            color: Qt.rgba(0.0, 0.0, 0.0, 0.55)
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {}
+            }
+
+            Rectangle {
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 24, 680)
+                height: Math.min(parent.height - 24, 500)
+                radius: Number(root.previewStyle.corner_radius) + 2
+                color: previewColor("window_background", "#1a1b26")
+                border.color: previewColor("border", "#3d4355")
+                border.width: 1
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 10
+
+                    Item {
+                        width: parent.width
+                        height: 34
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.right: refreshCatalogButton.left
+                            anchors.rightMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Shader library"
+                            color: textColor()
+                            font.family: themeData.uiFont
+                            font.pixelSize: 13
+                            font.bold: true
+                            elide: Text.ElideRight
+                        }
+
+                        Rectangle {
+                            id: closeCatalogButton
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 34
+                            height: 34
+                            radius: width / 2
+                            color: closeCatalogMouse.containsMouse
+                                ? Qt.alpha(themeData.colors.error || "#f7768e", 0.48)
+                                : Qt.alpha(themeData.colors.error || "#f7768e", 0.28)
+                            border.width: 0
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "×"
+                                color: textColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 14
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                id: closeCatalogMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: wallpaperRoot.shaderBrowserVisible = false
+                            }
+
+                            Behavior on color {
+                                ColorAnimation { duration: 100 }
+                            }
+                        }
+
+                        Rectangle {
+                            id: refreshCatalogButton
+                            anchors.right: closeCatalogButton.left
+                            anchors.rightMargin: 8
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 34
+                            height: 34
+                            radius: width / 2
+                            enabled: !wallpaperRoot.shaderCatalogLoading
+                            opacity: enabled ? 1.0 : 0.45
+                            color: refreshCatalogMouse.containsMouse
+                                ? Qt.alpha(accentColor(), 0.36)
+                                : Qt.alpha(accentColor(), 0.18)
+                            border.width: 0
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "↻"
+                                color: textColor()
+                                font.family: themeData.uiFont
+                                font.pixelSize: 16
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                id: refreshCatalogMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: parent.enabled
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: wallpaperRoot.refreshShaderCatalog()
+                            }
+
+                            Behavior on color {
+                                ColorAnimation { duration: 100 }
+                            }
+                        }
+                    }
+
+                    TextField {
+                        id: shaderSearch
+                        width: parent.width
+                        placeholderText: "Search shaders, authors, categories or licences…"
+                    }
+
+                    Row {
+                        width: parent.width
+                        height: parent.height - 94
+                        spacing: 12
+
+                        Rectangle {
+                            width: 300
+                            height: parent.height
+                            radius: 8
+                            color: Qt.alpha(surfaceColor(), 0.32)
+
+                            ListView {
+                                id: shaderCatalogList
+                                FastWheelHandler { scroller: shaderCatalogList }
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                clip: true
+                                spacing: 3
+                                model: wallpaperRoot.filteredCatalog(shaderSearch.text)
+
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: shaderCatalogList.width
+                                    height: 54
+                                    radius: 6
+                                    color: wallpaperRoot.selectedCatalogShader
+                                        && wallpaperRoot.selectedCatalogShader.id === modelData.id
+                                        ? selectedColor()
+                                        : "transparent"
+
+                                    Column {
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: 8
+                                        anchors.rightMargin: 8
+                                        spacing: 2
+
+                                        Text {
+                                            width: parent.width
+                                            text: modelData.name
+                                            color: textColor()
+                                            font.family: themeData.uiFont
+                                            font.pixelSize: 10
+                                            font.bold: true
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            text: (modelData.category || "Other")
+                                                + "  •  "
+                                                + (modelData.license_label || modelData.license || "Unknown licence")
+                                                + (modelData.supported ? "" : "  •  Future support")
+                                            color: modelData.license_status === "upstream-unverified"
+                                                ? (themeData.colors.warning || "#e0af68")
+                                                : (modelData.supported
+                                                    ? mutedColor()
+                                                    : (themeData.colors.warning || "#e0af68"))
+                                            font.family: "JetBrains Mono"
+                                            font.pixelSize: 8
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: wallpaperRoot.selectedCatalogShader = modelData
+                                    }
+                                }
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: wallpaperRoot.shaderCatalogLoading
+                                text: "Loading shader library…"
+                                color: mutedColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 10
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: !wallpaperRoot.shaderCatalogLoading
+                                    && !wallpaperRoot.shaderCatalog.length
+                                    && !wallpaperRoot.shaderCatalogError
+                                text: "No permitted shaders found."
+                                color: mutedColor()
+                                font.family: "JetBrains Mono"
+                                font.pixelSize: 9
+                            }
+                        }
+
+                        Item {
+                            id: shaderDetailPane
+                            width: parent.width - 312
+                            height: parent.height
+
+                            Column {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 48
+                                spacing: 8
+
+                                Rectangle {
+                                    width: parent.width
+                                    height: 150
+                                    radius: 8
+                                    color: Qt.alpha(surfaceColor(), 0.32)
+                                    clip: true
+
+                                    Image {
+                                        anchors.fill: parent
+                                        source: wallpaperRoot.selectedCatalogShader
+                                            ? wallpaperRoot.selectedCatalogShader.thumbnail_url || ""
+                                            : ""
+                                        fillMode: Image.PreserveAspectCrop
+                                        asynchronous: true
+                                        visible: source !== ""
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: !wallpaperRoot.selectedCatalogShader
+                                            || !wallpaperRoot.selectedCatalogShader.thumbnail_url
+                                        text: wallpaperRoot.selectedCatalogShader
+                                            ? "No preview available"
+                                            : "Select a shader"
+                                        color: mutedColor()
+                                        font.family: "JetBrains Mono"
+                                        font.pixelSize: 10
+                                    }
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    text: wallpaperRoot.selectedCatalogShader
+                                        ? wallpaperRoot.selectedCatalogShader.name
+                                        : "Shader details"
+                                    color: textColor()
+                                    font.family: themeData.uiFont
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    text: {
+                                        var item = wallpaperRoot.selectedCatalogShader
+                                        if (!item) return ""
+                                        var author = item.author || "Unknown author"
+                                        var licenseText = item.license_label || item.license || "Unknown licence"
+                                        return author + "  •  " + licenseText
+                                    }
+                                    color: mutedColor()
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: 9
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    text: {
+                                        var item = wallpaperRoot.selectedCatalogShader
+                                        if (!item) return "Choose a shader from the library."
+                                        if (item.supported)
+                                            return "Compatible with the current Orbit renderer."
+                                        var needs = (item.requirements || []).join(", ")
+                                        return "Requires future renderer support: " + needs
+                                    }
+                                    color: wallpaperRoot.selectedCatalogShader
+                                        && wallpaperRoot.selectedCatalogShader.supported
+                                        ? (themeData.colors.success || "#9ece6a")
+                                        : (themeData.colors.warning || "#e0af68")
+                                    font.family: themeData.uiFont
+                                    font.pixelSize: 9
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    visible: wallpaperRoot.selectedCatalogShader
+                                        && wallpaperRoot.selectedCatalogShader.license_status === "upstream-unverified"
+                                    text: "Upstream shader source does not declare a licence. Orbit allows it from this curated repository, but keeps the status visible."
+                                    color: themeData.colors.warning || "#e0af68"
+                                    font.family: themeData.uiFont
+                                    font.pixelSize: 8
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Item { width: 1; height: 1 }
+
+                                Text {
+                                    width: parent.width
+                                    visible: wallpaperRoot.shaderCatalogError !== ""
+                                    text: wallpaperRoot.shaderCatalogError
+                                    color: themeData.colors.error || "#f7768e"
+                                    font.family: "JetBrains Mono"
+                                    font.pixelSize: 9
+                                    wrapMode: Text.WordWrap
+                                }
+
+                            }
+
+
+                            WallpaperButton {
+                                themeData: root.themeData
+                                text: wallpaperRoot.selectedCatalogShader
+                                    && wallpaperRoot.selectedCatalogShader.installed
+                                    ? "Reinstall & Apply"
+                                    : "Install & Apply"
+                                highlighted: true
+                                enabled: wallpaperRoot.selectedCatalogShader
+                                    && wallpaperRoot.selectedCatalogShader.supported
+                                    && !shaderInstallProcess.running
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                onClicked: wallpaperRoot.installCatalogShader(
+                                    wallpaperRoot.selectedCatalogShader
+                                )
+                            }
+
+
+
+    }
+                    }
+                }
+            }
+        }
+    }
+}
