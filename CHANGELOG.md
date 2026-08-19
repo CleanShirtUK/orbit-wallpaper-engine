@@ -4,6 +4,19 @@ All notable changes to Orbit Wallpaper Engine will be documented here.
 
 The project follows semantic versioning where practical.
 
+## [0.1.1] - 2026-08-19
+
+### Added
+
+- Documented the renderer control FIFO as an integration API.
+- Added generic timeout-bounded renderer signalling example.
+- Added a Hyprland reference integration for wallpaper session transitions.
+
+### Changed
+
+- Reference integrations treat wallpaper transitions as cosmetic and non-fatal so a missing renderer cannot block a session-critical action.
+- Documented the obsolete pre-rename control FIFO path.
+
 ## [0.1.0] - 2026-08-19
 
 Initial public release candidate.

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+"$script_dir/wallpaper-animation" exit || true
+sleep 1
+if [ -n "${XDG_SESSION_ID:-}" ] && command -v loginctl >/dev/null 2>&1; then
+    exec loginctl terminate-session "$XDG_SESSION_ID"
+fi
+printf '%s\n' "No XDG_SESSION_ID/loginctl available; adapt this example for your session manager." >&2
+exit 1

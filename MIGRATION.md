@@ -17,3 +17,8 @@ New user paths:
 
 Step 5A changes the source tree only. It does not replace the currently-running
 legacy installation.
+
+## Control FIFO
+
+Integrations must use `${XDG_CACHE_HOME:-$HOME/.cache}/orbit-wallpaper-engine/control`. The former `~/.cache/ps3-wave-wallpaper/control` path is obsolete. Writes should be timeout-bounded; see `INTEGRATION.md`.
+

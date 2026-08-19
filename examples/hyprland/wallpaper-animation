@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+control="${XDG_CACHE_HOME:-$HOME/.cache}/orbit-wallpaper-engine/control"
+signal_renderer() {
+    command="$1"
+    [ -p "$control" ] || return 0
+    timeout 0.5s sh -c 'printf "%s\n" "$1" > "$2"' sh "$command" "$control" >/dev/null 2>&1 || true
+}
+case "${1:-}" in
+    intro|exit|palette) signal_renderer "$1" ;;
+    *) printf 'usage: %s {intro|exit|palette}\n' "$0" >&2; exit 2 ;;
+esac

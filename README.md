@@ -170,6 +170,10 @@ AI assistance was substantial during development. The project concept, behaviour
 See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) for the full disclosure.
 
 
+## Integration
+
+Standalone use requires no desktop-specific integration. Optional integrations can send `intro`, `exit`, and `palette` through the control FIFO. See [INTEGRATION.md](INTEGRATION.md) and the reference examples under `examples/`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports should follow [SECURITY.md](SECURITY.md).

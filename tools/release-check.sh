@@ -46,6 +46,10 @@ say "Checking shell syntax"
 bash -n install.sh
 bash -n uninstall.sh
 bash -n tools/orbit-wallpaper-settings
+bash -n examples/generic/signal-wallpaper
+bash -n examples/hyprland/wallpaper-animation
+bash -n examples/hyprland/animate-shutdown
+bash -n tools/test-integrations.sh
 
 say "Checking Python syntax"
 python3 -m py_compile \
@@ -86,6 +90,9 @@ if grep -RInE \
 then
     fail "Stale project identity found outside documented migration compatibility"
 fi
+
+say "Testing integration behaviour"
+./tools/test-integrations.sh
 
 say "Checking build dependencies"
 ./install.sh --check
