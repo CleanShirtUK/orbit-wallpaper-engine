@@ -5,7 +5,7 @@ import QtQuick.Window
 Window {
     id: window
     width: 900
-    height: 680
+    height: 620
     visible: true
     title: "Orbit Wallpaper Engine"
     color: "#12131b"
@@ -13,8 +13,8 @@ Window {
 
     Rectangle {
         anchors.fill: parent
-        anchors.margins: 16
-        radius: 14
+        anchors.margins: 18
+        radius: 12
         color: "#1a1b26"
         border.width: 1
         border.color: "#3d4355"
@@ -24,8 +24,8 @@ Window {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.margins: 18
-            height: 54
+            anchors.margins: 16
+            height: 50
 
             Column {
                 anchors.left: parent.left
@@ -83,9 +83,9 @@ Window {
             anchors.right: parent.right
             anchors.top: header.bottom
             anchors.bottom: parent.bottom
-            anchors.leftMargin: 18
-            anchors.rightMargin: 18
-            anchors.bottomMargin: 18
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            anchors.bottomMargin: 16
         }
     }
 }

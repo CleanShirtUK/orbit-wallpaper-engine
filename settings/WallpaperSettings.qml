@@ -13,8 +13,10 @@ Item {
             text: "#c0caf5",
             text_muted: "#9aa5ce",
             surface: "#24283b",
+            surface_elevated: "#2c3148",
             surface_selected: "#333954",
             accent: "#7aa2f7",
+            accent_foreground: "#16161e",
             border: "#3d4355",
             error: "#f7768e",
             success: "#9ece6a",
@@ -22,8 +24,10 @@ Item {
         })
     })
     property var previewStyle: ({ corner_radius: 10 })
+    readonly property int standaloneSmallCornerRadius: 8
     property string helperPath: Quickshell.env("HOME") + "/.local/bin/orbit-wallpaper-helper"
     property string wallpaperServiceStatus: "unknown"
+    property bool showModeTabs: false
 
     function textColor() { return themeData.colors.text || "#c0caf5" }
     function mutedColor() { return themeData.colors.text_muted || "#9aa5ce" }
@@ -32,65 +36,273 @@ Item {
     function accentColor() { return themeData.colors.accent || "#7aa2f7" }
     function previewColor(key, fallback) { return themeData.colors[key] || fallback }
 
-    component WallpaperButton: Rectangle {
+    component WallpaperButton: Button {
         id: control
 
-        // Compatibility with Orbit.OrbitButton call sites in the extracted
-        // page. The standalone control defaults to the host theme, but accepts
-        // an explicit themeData assignment exactly like the Orbit component.
+        // Same public contract and visual behaviour as OrbitButton.qml,
+        // but self-contained so Orbit Wallpaper Engine has no Orbit Theme.qml
+        // runtime dependency.
         property var themeData: root.themeData
-        property alias text: label.text
-        property bool compact: false
+        property bool destructive: false
         property bool subtle: false
-        property bool highlighted: false
-        property bool enabled: true
-        signal clicked()
+        property bool compact: false
 
-        readonly property real horizontalPadding: compact ? 12 : 16
-        readonly property real controlHeight: compact ? 30 : 36
+        implicitHeight: compact ? 32 : 36
+        leftPadding: 14
+        rightPadding: 14
+        topPadding: 0
+        bottomPadding: 0
 
-        implicitWidth: Math.max(72, label.implicitWidth + horizontalPadding * 2)
-        implicitHeight: controlHeight
-        width: implicitWidth
-        height: implicitHeight
-        radius: Math.max(6, Number(root.previewStyle.corner_radius || 10) * 0.75)
+        contentItem: Text {
+            text: control.text
+            color: !control.enabled ? Qt.alpha(control.textColor(), 0.45)
+                : control.destructive ? control.errorColor()
+                : control.highlighted ? control.foregroundColor()
+                : control.textColor()
+            font.family: control.themeData && control.themeData.uiFont
+                ? control.themeData.uiFont
+                : "JetBrains Mono"
+            font.pixelSize: control.compact ? 11 : 12
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
+        }
 
-        opacity: enabled ? 1.0 : 0.45
-        color: {
-            if (highlighted)
-                return Qt.alpha(root.accentColor(), hover.containsMouse ? 0.34 : 0.24)
-            if (subtle)
-                return hover.containsMouse
-                    ? Qt.alpha(root.surfaceColor(), 0.82)
-                    : Qt.alpha(root.surfaceColor(), 0.48)
-            return hover.containsMouse
-                ? Qt.alpha(root.selectedColor(), 0.92)
+        background: Rectangle {
+            radius: control.themeData && control.themeData.smallCornerRadius !== undefined
+                ? control.themeData.smallCornerRadius
+                : 8
+            color: !control.enabled ? control.surfaceColor(0.35)
+                : control.pressed ? control.surfaceColor(0.95)
+                : control.hovered ? control.surfaceColor(0.82)
+                : control.highlighted ? control.accentColor()
+                : control.subtle ? "transparent"
+                : control.surfaceColor(0.68)
+            border.width: control.activeFocus ? 2 : (control.subtle ? 0 : 1)
+            border.color: control.activeFocus
+                ? control.accentColor()
+                : control.borderColor()
+        }
+
+        function colors() {
+            return control.themeData && control.themeData.colors
+                ? control.themeData.colors
+                : root.themeData.colors
+        }
+
+        function textColor() {
+            return colors().text || "#c0caf5"
+        }
+
+        function foregroundColor() {
+            return colors().accent_foreground || "#16161e"
+        }
+
+        function accentColor() {
+            return colors().accent || "#7aa2f7"
+        }
+
+        function errorColor() {
+            return colors().error || "#f7768e"
+        }
+
+        function surfaceColor(alpha) {
+            return Qt.alpha(colors().surface || "#24283b", alpha)
+        }
+
+        function borderColor() {
+            return colors().border || "#3d4355"
+        }
+    }
+
+
+    component WallpaperSlider: Slider {
+        id: control
+
+        implicitHeight: 24
+
+        background: Rectangle {
+            x: control.leftPadding
+            y: control.topPadding + control.availableHeight / 2 - height / 2
+            width: control.availableWidth
+            height: 4
+            radius: 2
+            color: Qt.alpha(root.themeData.colors.border || "#3d4355", 0.95)
+
+            Rectangle {
+                width: control.visualPosition * parent.width
+                height: parent.height
+                radius: parent.radius
+                color: root.accentColor()
+            }
+        }
+
+        handle: Rectangle {
+            x: control.leftPadding
+                + control.visualPosition * (control.availableWidth - width)
+            y: control.topPadding + control.availableHeight / 2 - height / 2
+            width: 14
+            height: 14
+            radius: 7
+            color: control.pressed
+                ? Qt.lighter(root.themeData.colors.text || "#c0caf5", 1.08)
+                : (root.themeData.colors.text || "#c0caf5")
+            border.width: 1
+            border.color: Qt.alpha(root.themeData.colors.border || "#3d4355", 0.8)
+        }
+    }
+
+    component WallpaperCheckBox: CheckBox {
+        id: control
+
+        spacing: 8
+        implicitHeight: 28
+
+        indicator: Rectangle {
+            implicitWidth: 18
+            implicitHeight: 18
+            x: 0
+            y: parent.height / 2 - height / 2
+            radius: 5
+            color: control.checked
+                ? root.accentColor()
                 : Qt.alpha(root.surfaceColor(), 0.72)
+            border.width: 1
+            border.color: control.activeFocus
+                ? root.accentColor()
+                : (root.themeData.colors.border || "#3d4355")
+
+            Text {
+                anchors.centerIn: parent
+                visible: control.checked
+                text: "✓"
+                color: root.themeData.colors.accent_foreground || "#16161e"
+                font.family: root.themeData.uiFont
+                font.pixelSize: 12
+                font.bold: true
+            }
         }
 
-        border.width: highlighted ? 1 : 0
-        border.color: highlighted ? Qt.alpha(root.accentColor(), 0.72) : "transparent"
+        contentItem: Text {
+            leftPadding: control.indicator.width + control.spacing
+            text: control.text
+            color: control.enabled
+                ? root.textColor()
+                : Qt.alpha(root.textColor(), 0.45)
+            font.family: root.themeData.uiFont
+            font.pixelSize: 11
+            verticalAlignment: Text.AlignVCenter
+        }
+    }
 
-        Text {
-            id: label
-            anchors.centerIn: parent
+    component WallpaperComboBox: ComboBox {
+        id: control
+
+        implicitHeight: 36
+        leftPadding: 12
+        rightPadding: 34
+
+        contentItem: Text {
+            leftPadding: 0
+            rightPadding: 0
+            text: control.displayText
             color: root.textColor()
-            font.family: control.themeData.uiFont || root.themeData.uiFont
-            font.pixelSize: control.compact ? 10 : 11
-            font.bold: control.highlighted
+            font.family: root.themeData.uiFont
+            font.pixelSize: 11
+            verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight
         }
 
-        MouseArea {
-            id: hover
-            anchors.fill: parent
-            hoverEnabled: true
-            enabled: control.enabled
-            cursorShape: Qt.PointingHandCursor
-            onClicked: control.clicked()
+        indicator: Text {
+            x: control.width - width - 12
+            y: control.height / 2 - height / 2
+            text: "⌄"
+            color: root.mutedColor()
+            font.family: root.themeData.uiFont
+            font.pixelSize: 14
         }
 
-        Behavior on color {
-            ColorAnimation { duration: 100 }
+        background: Rectangle {
+            radius: root.themeData.smallCornerRadius !== undefined
+                ? root.themeData.smallCornerRadius : 8
+            color: control.pressed
+                ? Qt.alpha(root.surfaceColor(), 0.95)
+                : control.hovered
+                    ? Qt.alpha(root.surfaceColor(), 0.82)
+                    : Qt.alpha(root.surfaceColor(), 0.68)
+            border.width: control.activeFocus ? 2 : 1
+            border.color: control.activeFocus
+                ? root.accentColor()
+                : (root.themeData.colors.border || "#3d4355")
+        }
+
+        popup: Popup {
+            y: control.height + 4
+            width: control.width
+            implicitHeight: Math.min(contentItem.implicitHeight + 8, 320)
+            padding: 4
+
+            contentItem: ListView {
+                clip: true
+                implicitHeight: contentHeight
+                model: control.popup.visible ? control.delegateModel : null
+                currentIndex: control.highlightedIndex
+                ScrollIndicator.vertical: ScrollIndicator {}
+            }
+
+            background: Rectangle {
+                radius: 8
+                color: root.themeData.colors.surface_elevated
+                    || root.themeData.colors.surface
+                    || "#2c3148"
+                border.width: 1
+                border.color: root.themeData.colors.border || "#3d4355"
+            }
+        }
+
+        delegate: ItemDelegate {
+            width: control.width - 8
+            highlighted: control.highlightedIndex === index
+
+            contentItem: Text {
+                text: modelData
+                color: root.textColor()
+                font.family: root.themeData.uiFont
+                font.pixelSize: 11
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+            }
+
+            background: Rectangle {
+                radius: 6
+                color: highlighted
+                    ? Qt.alpha(root.accentColor(), 0.24)
+                    : "transparent"
+            }
+        }
+    }
+
+    component WallpaperTextField: TextField {
+        id: control
+
+        implicitHeight: 36
+        leftPadding: 12
+        rightPadding: 12
+        color: root.textColor()
+        placeholderTextColor: root.mutedColor()
+        selectionColor: root.accentColor()
+        selectedTextColor: root.themeData.colors.accent_foreground || "#16161e"
+        font.family: root.themeData.uiFont
+        font.pixelSize: 11
+
+        background: Rectangle {
+            radius: root.themeData.smallCornerRadius !== undefined
+                ? root.themeData.smallCornerRadius : 8
+            color: Qt.alpha(root.surfaceColor(), 0.52)
+            border.width: control.activeFocus ? 2 : 1
+            border.color: control.activeFocus
+                ? root.accentColor()
+                : (root.themeData.colors.border || "#3d4355")
         }
     }
 
@@ -560,6 +772,39 @@ Item {
             width: parent.width
             spacing: 10
 
+            Row {
+                visible: root.showModeTabs
+                                width: parent.width
+                                spacing: 10
+
+                                WallpaperButton {
+                                    width: (parent.width - 20) / 3
+                                    text: "Shader"
+                                    highlighted: wallpaperRoot.wallpaperMode === "shader"
+                                    onClicked: wallpaperRoot.wallpaperMode = "shader"
+                                }
+
+                                WallpaperButton {
+                                    width: (parent.width - 20) / 3
+                                    text: "Wallpaper"
+                                    highlighted: wallpaperRoot.wallpaperMode === "wallpaper"
+                                    onClicked: {
+                                        wallpaperRoot.wallpaperMode = "wallpaper"
+                                        wallpaperRoot.wallpaperStatusText = "Wallpaper mode is not connected yet."
+                                    }
+                                }
+
+                                WallpaperButton {
+                                    width: (parent.width - 20) / 3
+                                    text: "Static colour"
+                                    highlighted: wallpaperRoot.wallpaperMode === "colour"
+                                    onClicked: {
+                                        wallpaperRoot.wallpaperMode = "colour"
+                                        wallpaperRoot.wallpaperStatusText = "Static colour mode is not connected yet."
+                                    }
+                                }
+                            }
+
             
 
             Item {
@@ -584,7 +829,7 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                         }
 
-                        ComboBox {
+                        WallpaperComboBox {
                             width: parent.width - 112 - shaderBrowseButton.implicitWidth - 20
                             model: wallpaperRoot.shaderFiles
                             currentIndex: wallpaperRoot.shaderIndex()
@@ -623,7 +868,7 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                             }
 
-                            Slider {
+                            WallpaperSlider {
                                 width: parent.width - 104 - 44 - 16
                                 from: 0.0
                                 to: 1.0
@@ -660,7 +905,7 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                             }
 
-                            Slider {
+                            WallpaperSlider {
                                 width: parent.width - 104 - 44 - 16
                                 from: 0.0
                                 to: 1.0
@@ -723,7 +968,7 @@ Item {
                             height: 1
                         }
 
-                        CheckBox {
+                        WallpaperCheckBox {
                             text: "Resource governor"
                             checked: wallpaperRoot.resourceGovernor
                             anchors.verticalCenter: parent.verticalCenter
@@ -773,7 +1018,7 @@ Item {
                                     font.pixelSize: 9
                                 }
 
-                                Slider {
+                                WallpaperSlider {
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.bottom: parent.bottom
@@ -821,7 +1066,7 @@ Item {
                                 font.pixelSize: 9
                             }
 
-                            Slider {
+                            WallpaperSlider {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
@@ -864,7 +1109,7 @@ Item {
                                 font.pixelSize: 9
                             }
 
-                            Slider {
+                            WallpaperSlider {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
@@ -979,7 +1224,7 @@ Item {
                                     font.pixelSize: 9
                                 }
 
-                                Slider {
+                                WallpaperSlider {
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.bottom: parent.bottom
@@ -1208,7 +1453,7 @@ Item {
                         }
                     }
 
-                    TextField {
+                    WallpaperTextField {
                         id: shaderSearch
                         width: parent.width
                         placeholderText: "Search shaders, authors, categories or licences…"
