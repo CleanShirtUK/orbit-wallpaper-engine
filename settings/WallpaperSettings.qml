@@ -1645,7 +1645,7 @@ Item {
                                     width: parent.width
                                     visible: wallpaperRoot.selectedCatalogShader
                                         && wallpaperRoot.selectedCatalogShader.license_status === "upstream-unverified"
-                                    text: "Upstream shader source does not declare a licence. Orbit allows it from this curated repository, but keeps the status visible."
+                                    text: "Upstream shader source does not declare a licence. Orbit permits it under the shader catalogue policy and keeps the status visible."
                                     color: themeData.colors.warning || "#e0af68"
                                     font.family: themeData.uiFont
                                     font.pixelSize: 8

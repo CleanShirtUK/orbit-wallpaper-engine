@@ -1,0 +1,60 @@
+name: Shader removal / blacklist request
+description: Request that a shader be removed from Orbit's catalogue
+title: "[Shader removal] "
+labels:
+  - shader-removal
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to request that a shader is blocked from Orbit Wallpaper Engine's optional shader catalogue.
+
+        Please do not post private personal information. If a request needs private supporting information, say so in the details.
+
+  - type: input
+    id: shader
+    attributes:
+      label: Shader name
+    validations:
+      required: true
+
+  - type: input
+    id: shader_id
+    attributes:
+      label: Shader ID
+      description: The UUID shown by Orbit, if known.
+
+  - type: input
+    id: source
+    attributes:
+      label: Relevant source
+      description: Link or upstream reference that helps identify the shader.
+
+  - type: dropdown
+    id: reason
+    attributes:
+      label: Reason
+      options:
+        - Rights holder request
+        - Licence or redistribution concern
+        - Incorrect attribution
+        - Upstream removal
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Explain the request without including sensitive personal information.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: declaration
+    attributes:
+      label: Confirmation
+      options:
+        - label: I believe the information in this request is accurate.
+          required: true

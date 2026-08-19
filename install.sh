@@ -154,6 +154,7 @@ install -m 0755 "$ROOT/tools/orbit-wallpaper-helper" "$BINDIR/orbit-wallpaper-he
 
 say "Installing default shader and settings assets"
 install -m 0644 "$ROOT/wave.frag" "$APP_DATA/wave.frag"
+install -m 0644 "$ROOT/shader-blacklist.json" "$APP_DATA/shader-blacklist.json"
 install -m 0644 "$ROOT/settings/WallpaperSettings.qml" "$APP_DATA/settings/WallpaperSettings.qml"
 install -m 0644 "$ROOT/settings/StandaloneSettings.qml" "$APP_DATA/settings/StandaloneSettings.qml"
 
