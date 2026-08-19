@@ -23,7 +23,6 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
 #define MAX_OUTPUTS 16
-#define DEFAULT_PALETTE_RELATIVE ".config/hypr/noctalia.lua"
 #define DEFAULT_SNAPSHOT_RELATIVE ".cache/orbit-wallpaper-engine"
 #define DEFAULT_BACKGROUND_RELATIVE ".cache/orbit-wallpaper-engine/hyprlock-background.conf"
 #define DEFAULT_CONTROL_RELATIVE ".cache/orbit-wallpaper-engine/control"
@@ -96,8 +95,6 @@ struct app {
     time_t palette_mtime;
     bool follow_system_palette;
     bool snapshot_dirty;
-    bool greeter_sync_pending;
-    double next_greeter_sync;
     bool capture_snapshots;
     bool debug_frames;
     bool frozen;
@@ -1098,15 +1095,6 @@ static void render(struct app *app, float seconds, float brightness, float visib
     }
     if (capture_snapshot) {
         app->snapshot_dirty = !snapshots_saved;
-        if (snapshots_saved) app->greeter_sync_pending = true;
-    }
-    double now = monotonic_seconds();
-    if (app->greeter_sync_pending && now >= app->next_greeter_sync) {
-        if (system("noctalia msg greeter-sync >/dev/null 2>&1") == 0) {
-            app->greeter_sync_pending = false;
-        } else {
-            app->next_greeter_sync = now + 1.0;
-        }
     }
     eglMakeCurrent(app->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
@@ -1181,7 +1169,7 @@ int main(int argc, char **argv) {
     if (palette_path && *palette_path) {
         snprintf(app.palette_path, sizeof(app.palette_path), "%s", palette_path);
     } else {
-        snprintf(app.palette_path, sizeof(app.palette_path), "%s/%s", home, DEFAULT_PALETTE_RELATIVE);
+        app.palette_path[0] = '\0';
     }
     snprintf(app.snapshot_dir, sizeof(app.snapshot_dir), "%s/%s", home, DEFAULT_SNAPSHOT_RELATIVE);
     const char *background_path = environment_value("ORBIT_WALLPAPER_BACKGROUND_FILE", "PS3_WAVE_BACKGROUND_FILE");
@@ -1381,15 +1369,15 @@ int main(int argc, char **argv) {
             visibility_value = 0.0f;
         }
 
-        // PS3_WAVE_SPEED scales shader time independently of the intro/exit
+        // ORBIT_WALLPAPER_SPEED scales shader time independently of the intro/exit
         // envelope. 1.0 is authored speed, 0.5 is half speed, 2.0 is double.
         const float effective_speed = speed * app.shader_speed;
         app.shader_time_delta = (float)(frame_delta * effective_speed);
         motion_time += frame_delta * effective_speed;
         float elapsed = (float)motion_time;
         app.shader_frame++;
-        // Noctalia sends an explicit palette request through the control FIFO.
-        // Keep a slow fallback for external edits or missed hook delivery.
+        // External integrations may request a palette refresh through the
+        // control FIFO. Keep a slow fallback for direct file edits.
         if (now - last_palette >= 5.0) {
             read_palette(&app);
             last_palette = now;

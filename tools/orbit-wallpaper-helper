@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Wallpaper-specific backend extracted from Orbit settings.
 
-Step-3 compatibility version: intentionally retains the current
-ps3-wave-wallpaper paths/service/ORBIT_WALLPAPER_* configuration contract so it can
-be tested without changing the live renderer or Orbit.
+Backend for Orbit Wallpaper Engine shader catalogue, installation and renderer control.
 """
 
 from __future__ import annotations
