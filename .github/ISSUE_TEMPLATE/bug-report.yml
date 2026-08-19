@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible Orbit Wallpaper Engine problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behaviour and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include distribution, compositor, GPU/driver and Orbit Wallpaper Engine version where relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant `journalctl --user -u orbit-wallpaper-engine.service` output. Remove private information first.
+      render: shell

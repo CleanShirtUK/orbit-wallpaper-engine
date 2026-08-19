@@ -1,5 +1,7 @@
 # Orbit Wallpaper Engine
 
+**Release status:** pre-1.0 / initial public release candidate. Interfaces may still change before 1.0.
+
 A lightweight Wayland shader wallpaper renderer with a standalone Quickshell settings UI, cross-monitor rendering, animated desktop transitions, palette mapping, performance controls, and an optional shader browser.
 
 Orbit Wallpaper Engine started as the wallpaper renderer for the Orbit desktop shell, but is designed to run independently.
@@ -166,6 +168,11 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licensing details.
 AI assistance was substantial during development. The project concept, behaviour, visual direction, acceptance decisions and hands-on regression testing were human-led; substantial portions of implementation, debugging, migration tooling and documentation were drafted or revised with OpenAI ChatGPT under that direction.
 
 See [AI_DISCLOSURE.md](AI_DISCLOSURE.md) for the full disclosure.
+
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports should follow [SECURITY.md](SECURITY.md).
 
 ## Licence
 
