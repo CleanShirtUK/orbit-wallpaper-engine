@@ -1,0 +1,28 @@
+[Unit]
+Description=PS3-style cross-monitor shader wallpaper
+PartOf=hyprland-session.target
+After=hyprland-session.target
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p %h/.cache/ps3-wave-wallpaper
+ExecStart=%h/.local/bin/ps3-wave-wallpaper
+
+# Reloading the service means "play the intro animation again".
+# This does NOT affect normal login startup: the renderer still starts hidden
+# and waits for Quickshell to send its usual intro command.
+ExecReload=/usr/bin/sh -c '/usr/bin/printf "intro\n" > "%h/.cache/ps3-wave-wallpaper/control"'
+
+EnvironmentFile=-%h/.config/ps3-wave-wallpaper/config
+Environment=PS3_WAVE_DISABLE_SNAPSHOTS=1
+Environment=PS3_WAVE_SKIP_INTRO=1
+Environment=PS3_WAVE_START_HIDDEN=1
+Environment=PS3_WAVE_BACKGROUND_FILE=%h/.cache/ps3-wave-wallpaper/hyprlock-background.conf
+Environment=PS3_WAVE_CONTROL_FILE=%h/.cache/ps3-wave-wallpaper/control
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+FinalKillSignal=SIGKILL
+
+[Install]
+WantedBy=hyprland-session.target
