@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+control="${ORBIT_WALLPAPER_CONTROL:-$HOME/.local/bin/orbit-wallpaper-control}"
+[ -x "$control" ] || exit 0
+
+deadline=$(( $(date +%s) + 10 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    status="$($control status --json 2>/dev/null || true)"
+    case "$status" in
+        *'"readiness": "ready"'*)
+            timeout 65s "$control" intro >/dev/null 2>&1 || true
+            exit 0
+            ;;
+    esac
+    sleep 0.1
+done
+exit 0

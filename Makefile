@@ -3,9 +3,12 @@ CC ?= cc
 APP := orbit-wallpaper-engine
 TARGET := $(APP)
 
+# Generated client bindings are checked in so clean clones do not require a
+# local protocol package or scanner at build time.
 SOURCES := \
 	renderer.c \
 	wlr-layer-shell-unstable-v1-protocol.c \
+	wlr-output-management-unstable-v1-protocol.c \
 	xdg-shell-protocol.c
 
 CFLAGS ?= -O2 -Wall -Wextra -Wpedantic
@@ -49,11 +52,13 @@ install: $(TARGET)
 	install -d "$(APP_SHADER_DIR)"
 	install -d "$(SYSTEMD_USER_DIR)"
 	install -m 0755 "$(TARGET)" "$(INSTALLED_BINARY)"
+	install -m 0755 tools/orbit-wallpaper-control "$(BINDIR)/orbit-wallpaper-control"
 	install -m 0644 wave.frag "$(INSTALLED_DEFAULT_SHADER)"
 	$(MAKE) --no-print-directory install-config
 	$(MAKE) --no-print-directory install-service
 	@printf '\nInstalled:\n'
 	@printf '  binary:         %s\n' "$(INSTALLED_BINARY)"
+	@printf '  control API:    %s\n' "$(BINDIR)/orbit-wallpaper-control"
 	@printf '  default shader: %s\n' "$(INSTALLED_DEFAULT_SHADER)"
 	@printf '  config:         %s\n' "$(INSTALLED_CONFIG)"
 	@printf '  user shaders:   %s\n' "$(APP_SHADER_DIR)"

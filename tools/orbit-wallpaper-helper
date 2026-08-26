@@ -55,79 +55,44 @@ SHADER_SERVICE = os.environ.get(
 )
 SHADER_CACHE_TTL = 6 * 60 * 60
 SHADER_HEADER_LIMIT = 16384
-
 BLACKLIST_FILENAME = "shader-blacklist.json"
 
 
-def _shader_blacklist() -> dict:
-    # Return blacklist entries keyed by upstream shader ID.
+def _shader_blacklist() -> dict[str, dict]:
     candidates = []
-
     explicit = os.environ.get("ORBIT_WALLPAPER_SHADER_BLACKLIST", "").strip()
     if explicit:
         candidates.append(Path(explicit).expanduser())
-
-    data_home = Path(
-        os.environ.get(
-            "XDG_DATA_HOME",
-            str(Path.home() / ".local" / "share"),
-        )
-    )
-    candidates.append(
-        data_home / "orbit-wallpaper-engine" / BLACKLIST_FILENAME
-    )
-
-    # Source-tree location for development/testing.
-    candidates.append(
-        Path(__file__).resolve().parent.parent / BLACKLIST_FILENAME
-    )
-
+    data_home = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+    candidates.extend((data_home / "orbit-wallpaper-engine" / BLACKLIST_FILENAME,
+                       Path(__file__).resolve().parent.parent / BLACKLIST_FILENAME))
     for candidate in candidates:
-        if not candidate.is_file():
-            continue
-
         try:
             payload = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-
-        entries = payload.get("blocked", [])
+        entries = payload.get("blocked", []) if isinstance(payload, dict) else []
         if not isinstance(entries, list):
             continue
-
-        blocked = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-
-            shader_id = str(entry.get("id", "")).strip()
-            if not shader_id:
-                continue
-
-            blocked[shader_id] = {
-                "reason": str(
-                    entry.get("reason", "Blocked by project policy")
-                ).strip(),
+        return {
+            str(entry.get("id")): {
+                "reason": str(entry.get("reason", "Blocked by project policy")),
                 "issue": entry.get("issue"),
             }
-
-        return blocked
-
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("id", "")).strip()
+        }
     return {}
 
 
 def _catalog_response(catalog: dict, include_unlicensed: bool) -> dict:
-    # Apply the current blacklist to a cached or fresh catalogue.
     blocked = _shader_blacklist()
     shaders = []
-
     for raw_item in catalog.get("shaders", []):
         if not isinstance(raw_item, dict):
             continue
-
         item = dict(raw_item)
         entry = blocked.get(str(item.get("id", "")))
-
         if entry:
             item["blacklisted"] = True
             item["blacklist_reason"] = entry["reason"]
@@ -135,41 +100,15 @@ def _catalog_response(catalog: dict, include_unlicensed: bool) -> dict:
             item["license_allowed"] = False
         else:
             item["blacklisted"] = False
-            item.pop("blacklist_reason", None)
-            item.pop("blacklist_issue", None)
-
         shaders.append(item)
-
-    allowed_count = sum(
-        1 for item in shaders if item.get("license_allowed")
-    )
-    supported_count = sum(
-        1 for item in shaders
-        if item.get("license_allowed") and item.get("supported")
-    )
-    blacklisted_count = sum(
-        1 for item in shaders if item.get("blacklisted")
-    )
-
-    response = {
-        **catalog,
-        "allowed_total": allowed_count,
-        "supported": supported_count,
-        "excluded_license": len(shaders) - allowed_count,
-        "blacklisted": blacklisted_count,
-        "shaders": shaders,
-    }
-
+    response = dict(catalog)
+    response["shaders"] = shaders
+    response["blacklisted"] = sum(1 for item in shaders if item["blacklisted"])
+    response["allowed_total"] = sum(1 for item in shaders if item.get("license_allowed"))
     if include_unlicensed:
         return response
-
-    return {
-        **response,
-        "shaders": [
-            item for item in shaders if item.get("license_allowed")
-        ],
-    }
-
+    response["shaders"] = [item for item in shaders if item.get("license_allowed")]
+    return response
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -606,15 +545,10 @@ def shader_install(
     item = _catalog_item(shader_id)
 
     if item.get("blacklisted"):
-        reason = (
-            item.get("blacklist_reason")
-            or "Blocked by project policy"
-        )
+        reason = item.get("blacklist_reason") or "Blocked by project policy"
         issue = item.get("blacklist_issue")
         suffix = f" (issue #{issue})" if issue else ""
-        raise ValueError(
-            f"Shader is blacklisted: {reason}{suffix}"
-        )
+        raise ValueError(f"Shader is blacklisted: {reason}{suffix}")
 
     if not item.get("license_allowed"):
         raise ValueError(

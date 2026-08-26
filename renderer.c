@@ -21,11 +21,14 @@
 #include <wayland-egl.h>
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "wlr-output-management-unstable-v1-client-protocol.h"
 
 #define MAX_OUTPUTS 16
 #define DEFAULT_SNAPSHOT_RELATIVE ".cache/orbit-wallpaper-engine"
 #define DEFAULT_BACKGROUND_RELATIVE ".cache/orbit-wallpaper-engine/hyprlock-background.conf"
 #define DEFAULT_CONTROL_RELATIVE ".cache/orbit-wallpaper-engine/control"
+#define DEFAULT_STATUS_RELATIVE ".cache/orbit-wallpaper-engine/status"
+#define DEFAULT_EVENTS_RELATIVE ".cache/orbit-wallpaper-engine/events"
 #define DEFAULT_SHADER_FILENAME "wave.frag"
 #define SHADER_DIRECTORY "shaders"
 #define DEFAULT_GPU_PRESSURE_ENTER 75.0f
@@ -52,6 +55,7 @@ struct color { float r, g, b; };
 
 struct output {
     struct app *app;
+    uint32_t registry_name;
     struct wl_output *wl_output;
     struct wl_surface *surface;
     struct zwlr_layer_surface_v1 *layer;
@@ -66,6 +70,17 @@ struct output {
     uint32_t configure_serial;
     bool configured;
     bool closed;
+    bool active;
+    // wl_output can remain registered while the compositor disables its head.
+    bool enabled;
+    bool needs_recreate;
+    bool removed;
+    char name[128];
+};
+
+struct output_head {
+    struct zwlr_output_head_v1 *head;
+    bool enabled;
     char name[128];
 };
 
@@ -73,12 +88,17 @@ struct app {
     struct wl_display *display;
     struct wl_compositor *compositor;
     struct zwlr_layer_shell_v1 *layer_shell;
+    struct zwlr_output_manager_v1 *output_manager;
+    struct output_head output_heads[MAX_OUTPUTS];
+    size_t output_head_count;
+    bool output_management_available;
     struct output outputs[MAX_OUTPUTS];
     size_t output_count;
     int min_x, min_y, max_x, max_y;
     EGLDisplay egl_display;
     EGLContext egl_context;
     EGLConfig egl_config;
+    EGLSurface compile_surface;
     GLuint program;
     GLuint blit_program;
     GLint blit_texture;
@@ -112,7 +132,14 @@ struct app {
     char snapshot_dir[PATH_MAX];
     char background_path[PATH_MAX];
     char control_path[PATH_MAX];
+    char status_path[PATH_MAX];
+    char events_path[PATH_MAX];
     int control_fd;
+    int events_fd;
+    char active_command[16];
+    char active_command_id[64];
+    bool command_completion_emitted;
+    bool surfaces_need_reconcile;
     float intro_duration;
     float exit_duration;
     float intro_peak_speed;
@@ -127,6 +154,16 @@ struct app {
 };
 
 enum animation_mode { ANIMATION_NORMAL, ANIMATION_INTRO, ANIMATION_EXIT, ANIMATION_HIDDEN };
+
+static const char *animation_name(enum animation_mode animation) {
+    switch (animation) {
+    case ANIMATION_INTRO: return "intro";
+    case ANIMATION_EXIT: return "exit";
+    case ANIMATION_HIDDEN: return "hidden";
+    case ANIMATION_NORMAL: return "normal";
+    }
+    return "unknown";
+}
 
 static volatile sig_atomic_t running = 1;
 
@@ -311,14 +348,51 @@ static bool open_control(struct app *app) {
     return app->control_fd >= 0;
 }
 
+static size_t surface_count(const struct app *app);
+static size_t active_output_count(const struct app *app);
+
+static bool write_status(struct app *app, const char *readiness, const char *animation) {
+    char temporary_path[PATH_MAX];
+    snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", app->status_path);
+    FILE *file = fopen(temporary_path, "w");
+    if (!file) return false;
+    fprintf(file, "readiness=%s\nsurfaces=%zu/%zu\nanimation=%s\n",
+            readiness, surface_count(app), active_output_count(app), animation);
+    if (fclose(file) != 0 || rename(temporary_path, app->status_path) != 0) {
+        unlink(temporary_path);
+        return false;
+    }
+    return true;
+}
+
+static void emit_event(struct app *app, const char *phase) {
+    if (app->events_fd < 0 || !app->active_command[0]) return;
+    dprintf(app->events_fd, "command=%s id=%s phase=%s surfaces=%zu/%zu\n",
+            app->active_command,
+            app->active_command_id,
+            phase,
+            surface_count(app),
+            active_output_count(app));
+}
+
 static int read_animation_request(struct app *app) {
     char commands[64];
     ssize_t length = read(app->control_fd, commands, sizeof(commands) - 1);
     if (length <= 0) return 0;
     commands[length] = '\0';
-    if (strstr(commands, "intro")) return 1;
-    if (strstr(commands, "exit")) return 2;
-    if (strstr(commands, "palette")) return 3;
+    char command[sizeof(app->active_command)] = {0};
+    char id[sizeof(app->active_command_id)] = {0};
+    if (sscanf(commands, "%15s %63s", command, id) < 1) return 0;
+    if (strcmp(command, "intro") == 0 || strcmp(command, "exit") == 0 ||
+        strcmp(command, "palette") == 0) {
+        snprintf(app->active_command, sizeof(app->active_command), "%s", command);
+        snprintf(app->active_command_id, sizeof(app->active_command_id), "%s", id);
+        app->command_completion_emitted = false;
+        emit_event(app, "accepted");
+    }
+    if (strcmp(command, "intro") == 0) return 1;
+    if (strcmp(command, "exit") == 0) return 2;
+    if (strcmp(command, "palette") == 0) return 3;
     return 0;
 }
 
@@ -747,6 +821,7 @@ static void output_geometry(void *data, struct wl_output *output, int32_t x, int
     (void)output; (void)physical_width; (void)physical_height;
     (void)subpixel; (void)make; (void)model; (void)transform;
     struct output *item = data;
+    if (item->x != x || item->y != y) item->needs_recreate = true;
     item->x = x;
     item->y = y;
 }
@@ -756,28 +831,161 @@ static void output_mode(void *data, struct wl_output *output, uint32_t flags,
     (void)output; (void)refresh;
     struct output *item = data;
     if (flags & WL_OUTPUT_MODE_CURRENT) {
+        if (item->mode_width != width || item->mode_height != height)
+            item->needs_recreate = true;
         item->mode_width = width;
         item->mode_height = height;
     }
 }
 
 static void output_done(void *data, struct wl_output *output) {
-    (void)data; (void)output;
+    (void)output;
+    struct output *item = data;
+    fprintf(stderr, "output metadata complete: %s at %d,%d mode %dx%d\n",
+            item->name[0] ? item->name : "(unnamed)",
+            item->x, item->y, item->mode_width, item->mode_height);
 }
 
 static void output_scale(void *data, struct wl_output *output, int32_t factor) {
     (void)data; (void)output; (void)factor;
 }
 
+static void sync_output_enabled_state(struct app *app);
+
 static void output_name(void *data, struct wl_output *output, const char *name) {
     (void)output;
     struct output *item = data;
     snprintf(item->name, sizeof(item->name), "%s", name);
+    sync_output_enabled_state(item->app);
 }
 
 static void output_description(void *data, struct wl_output *output, const char *description) {
     (void)data; (void)output; (void)description;
 }
+
+static void sync_output_enabled_state(struct app *app) {
+    // Output-management heads describe enabled state atomically, including
+    // heads whose wl_output global is temporarily absent while disabled.
+    for (size_t i = 0; i < app->output_count; i++) {
+        struct output *item = &app->outputs[i];
+        if (!item->active) continue;
+        for (size_t j = 0; j < app->output_head_count; j++) {
+            struct output_head *head = &app->output_heads[j];
+            if (head->name[0] && item->name[0] && strcmp(head->name, item->name) == 0) {
+                if (item->enabled != head->enabled) {
+                    item->enabled = head->enabled;
+                    item->needs_recreate = !head->enabled;
+                    app->surfaces_need_reconcile = true;
+                    fprintf(stderr, "output enabled state: %s (%s)\n", item->name,
+                            item->enabled ? "enabled" : "disabled");
+                }
+                break;
+            }
+        }
+    }
+}
+
+static void output_head_name(void *data, struct zwlr_output_head_v1 *head, const char *name) {
+    (void)head;
+    struct output_head *item = data;
+    snprintf(item->name, sizeof(item->name), "%s", name);
+}
+
+static void output_head_enabled(void *data, struct zwlr_output_head_v1 *head, int32_t enabled) {
+    (void)head;
+    struct output_head *item = data;
+    item->enabled = enabled != 0;
+}
+
+static void output_head_description(void *data, struct zwlr_output_head_v1 *head,
+                                    const char *description) {
+    (void)data; (void)head; (void)description;
+}
+
+static void output_head_physical_size(void *data, struct zwlr_output_head_v1 *head,
+                                      int32_t width, int32_t height) {
+    (void)data; (void)head; (void)width; (void)height;
+}
+
+static void output_head_mode(void *data, struct zwlr_output_head_v1 *head,
+                             struct zwlr_output_mode_v1 *mode) {
+    (void)data; (void)head; (void)mode;
+}
+
+static void output_head_current_mode(void *data, struct zwlr_output_head_v1 *head,
+                                     struct zwlr_output_mode_v1 *mode) {
+    (void)data; (void)head; (void)mode;
+}
+
+static void output_head_position(void *data, struct zwlr_output_head_v1 *head,
+                                 int32_t x, int32_t y) {
+    (void)data; (void)head; (void)x; (void)y;
+}
+
+static void output_head_transform(void *data, struct zwlr_output_head_v1 *head,
+                                  int32_t transform) {
+    (void)data; (void)head; (void)transform;
+}
+
+static void output_head_scale(void *data, struct zwlr_output_head_v1 *head,
+                              wl_fixed_t scale) {
+    (void)data; (void)head; (void)scale;
+}
+
+static void output_head_string(void *data, struct zwlr_output_head_v1 *head,
+                               const char *value) {
+    (void)data; (void)head; (void)value;
+}
+
+static void output_head_finished(void *data, struct zwlr_output_head_v1 *head) {
+    (void)data; (void)head;
+}
+
+static const struct zwlr_output_head_v1_listener output_head_listener = {
+    .name = output_head_name,
+    .description = output_head_description,
+    .physical_size = output_head_physical_size,
+    .mode = output_head_mode,
+    .enabled = output_head_enabled,
+    .current_mode = output_head_current_mode,
+    .position = output_head_position,
+    .transform = output_head_transform,
+    .scale = output_head_scale,
+    .finished = output_head_finished,
+    .make = output_head_string,
+    .model = output_head_string,
+    .serial_number = output_head_string,
+};
+
+static void output_manager_head(void *data, struct zwlr_output_manager_v1 *manager,
+                                struct zwlr_output_head_v1 *head) {
+    (void)manager;
+    struct app *app = data;
+    if (app->output_head_count >= MAX_OUTPUTS) {
+        fprintf(stderr, "ignoring output-management head: capacity reached\n");
+        return;
+    }
+    struct output_head *item = &app->output_heads[app->output_head_count++];
+    item->head = head;
+    item->enabled = true;
+    zwlr_output_head_v1_add_listener(head, &output_head_listener, item);
+}
+
+static void output_manager_done(void *data, struct zwlr_output_manager_v1 *manager,
+                                uint32_t serial) {
+    (void)manager; (void)serial;
+    sync_output_enabled_state(data);
+}
+
+static void output_manager_finished(void *data, struct zwlr_output_manager_v1 *manager) {
+    (void)data; (void)manager;
+}
+
+static const struct zwlr_output_manager_v1_listener output_manager_listener = {
+    .head = output_manager_head,
+    .done = output_manager_done,
+    .finished = output_manager_finished,
+};
 
 static const struct wl_output_listener output_listener = {
     .geometry = output_geometry,
@@ -788,20 +996,28 @@ static const struct wl_output_listener output_listener = {
     .description = output_description,
 };
 
+static bool create_scaled_render_targets(struct app *app);
+
 static void layer_configure(void *data, struct zwlr_layer_surface_v1 *layer,
                             uint32_t serial, uint32_t width, uint32_t height) {
     struct output *item = data;
+    if (item->configured && (item->width != (int)width || item->height != (int)height))
+        item->needs_recreate = true;
     item->configure_serial = serial;
     item->width = width ? (int)width : item->mode_width;
     item->height = height ? (int)height : item->mode_height;
     item->configured = true;
+    fprintf(stderr, "layer configure: %s %ux%u\n",
+            item->name[0] ? item->name : "(unnamed)", width, height);
     zwlr_layer_surface_v1_ack_configure(layer, serial);
 }
 
 static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {
     (void)layer;
-    ((struct output *)data)->closed = true;
-    running = 0;
+    struct output *item = data;
+    item->closed = true;
+    item->removed = true;
+    item->app->surfaces_need_reconcile = true;
 }
 
 static const struct zwlr_layer_surface_v1_listener layer_listener = {
@@ -812,23 +1028,59 @@ static const struct zwlr_layer_surface_v1_listener layer_listener = {
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
                             const char *interface, uint32_t version) {
     struct app *app = data;
+    fprintf(stderr, "Wayland global: %s (name %u, version %u)\n", interface, name, version);
     if (strcmp(interface, "wl_compositor") == 0) {
         app->compositor = wl_registry_bind(registry, name, &wl_compositor_interface,
                                            version < 4 ? version : 4);
     } else if (strcmp(interface, "zwlr_layer_shell_v1") == 0) {
         app->layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
                                              version < 4 ? version : 4);
-    } else if (strcmp(interface, "wl_output") == 0 && app->output_count < MAX_OUTPUTS) {
-        struct output *item = &app->outputs[app->output_count++];
+        fprintf(stderr, "layer-shell available (version %u)\n", version < 4 ? version : 4);
+    } else if (strcmp(interface, "zwlr_output_manager_v1") == 0) {
+        app->output_management_available = true;
+        app->output_manager = wl_registry_bind(registry, name,
+            &zwlr_output_manager_v1_interface, version < 2 ? version : 2);
+        zwlr_output_manager_v1_add_listener(app->output_manager,
+                                            &output_manager_listener, app);
+    } else if (strcmp(interface, "wl_output") == 0) {
+        size_t slot = app->output_count;
+        for (size_t i = 0; i < app->output_count; i++) {
+            if (!app->outputs[i].active) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == MAX_OUTPUTS) {
+            fprintf(stderr, "ignoring wl_output global %u: output capacity reached\n", name);
+            return;
+        }
+        struct output *item = &app->outputs[slot];
+        memset(item, 0, sizeof(*item));
         item->app = app;
+        item->registry_name = name;
+        item->active = true;
+        item->enabled = true;
+        if (slot == app->output_count) app->output_count++;
+        app->surfaces_need_reconcile = true;
         item->wl_output = wl_registry_bind(registry, name, &wl_output_interface,
                                            version < 4 ? version : 4);
         wl_output_add_listener(item->wl_output, &output_listener, item);
+        fprintf(stderr, "Wayland output bound: index %zu\n", slot);
     }
 }
 
 static void registry_remove(void *data, struct wl_registry *registry, uint32_t name) {
-    (void)data; (void)registry; (void)name;
+    (void)registry;
+    struct app *app = data;
+    fprintf(stderr, "Wayland global removed: name %u\n", name);
+    for (size_t i = 0; i < app->output_count; i++) {
+        struct output *item = &app->outputs[i];
+        if (item->active && item->registry_name == name) {
+            item->removed = true;
+            app->surfaces_need_reconcile = true;
+            return;
+        }
+    }
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -844,7 +1096,7 @@ static bool init_egl(struct app *app) {
     }
     eglBindAPI(EGL_OPENGL_ES_API);
     const EGLint config_attributes[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_NONE,
@@ -854,17 +1106,104 @@ static bool init_egl(struct app *app) {
     const EGLint context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     app->egl_context = eglCreateContext(app->egl_display, app->egl_config, EGL_NO_CONTEXT, context_attributes);
     if (app->egl_context == EGL_NO_CONTEXT) return false;
-    eglSwapInterval(app->egl_display, 0);
+    const EGLint pbuffer_attributes[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    app->compile_surface = eglCreatePbufferSurface(app->egl_display, app->egl_config,
+                                                    pbuffer_attributes);
+    if (app->compile_surface == EGL_NO_SURFACE) return false;
     return true;
+}
+
+static size_t surface_count(const struct app *app) {
+    size_t count = 0;
+    for (size_t i = 0; i < app->output_count; i++) {
+        if (app->outputs[i].active && app->outputs[i].egl_surface != EGL_NO_SURFACE) count++;
+    }
+    return count;
+}
+
+static size_t active_output_count(const struct app *app) {
+    size_t count = 0;
+    for (size_t i = 0; i < app->output_count; i++) {
+        if (app->outputs[i].active && app->outputs[i].enabled) count++;
+    }
+    return count;
+}
+
+static bool surfaces_ready(const struct app *app) {
+    const size_t outputs = active_output_count(app);
+    return outputs > 0 && surface_count(app) == outputs;
+}
+
+static void destroy_output_surface(struct app *app, struct output *item) {
+    if (item->render_fbo) glDeleteFramebuffers(1, &item->render_fbo);
+    if (item->render_texture) glDeleteTextures(1, &item->render_texture);
+    item->render_fbo = 0;
+    item->render_texture = 0;
+    item->render_width = 0;
+    item->render_height = 0;
+    if (item->egl_surface != EGL_NO_SURFACE) {
+        if (eglGetCurrentSurface(EGL_DRAW) == item->egl_surface &&
+            app->compile_surface != EGL_NO_SURFACE) {
+            eglMakeCurrent(app->egl_display, app->compile_surface,
+                           app->compile_surface, app->egl_context);
+        }
+        eglDestroySurface(app->egl_display, item->egl_surface);
+        item->egl_surface = EGL_NO_SURFACE;
+    }
+    if (item->egl_window) wl_egl_window_destroy(item->egl_window);
+    if (item->layer) zwlr_layer_surface_v1_destroy(item->layer);
+    if (item->surface) wl_surface_destroy(item->surface);
+    item->egl_window = NULL;
+    item->layer = NULL;
+    item->surface = NULL;
+    item->configured = false;
+    item->needs_recreate = false;
+}
+
+static void retire_removed_outputs(struct app *app) {
+    for (size_t i = 0; i < app->output_count; i++) {
+        struct output *item = &app->outputs[i];
+        if (!item->active || !item->removed) continue;
+        destroy_output_surface(app, item);
+        if (item->wl_output) wl_output_destroy(item->wl_output);
+        memset(item, 0, sizeof(*item));
+        item->egl_surface = EGL_NO_SURFACE;
+    }
 }
 
 static bool create_output_surfaces(struct app *app) {
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
+        if (!item->active) continue;
+        if (!item->enabled) {
+            if (item->egl_surface != EGL_NO_SURFACE || item->surface || item->layer)
+                destroy_output_surface(app, item);
+            continue;
+        }
+        if (item->egl_surface != EGL_NO_SURFACE && !item->needs_recreate) continue;
+        if (item->layer || item->surface) {
+            fprintf(stderr, "recreating incomplete surface for output %s\n",
+                    item->name[0] ? item->name : "(unnamed)");
+            destroy_output_surface(app, item);
+        }
+        fprintf(stderr, "creating layer surface for output %s\n",
+                item->name[0] ? item->name : "(unnamed)");
         item->surface = wl_compositor_create_surface(app->compositor);
+        if (!item->surface) {
+            fprintf(stderr, "could not create wl_surface for output %s\n",
+                    item->name[0] ? item->name : "(unnamed)");
+            return false;
+        }
         item->layer = zwlr_layer_shell_v1_get_layer_surface(
             app->layer_shell, item->surface, item->wl_output,
             ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, "orbit-wallpaper-engine");
+        if (!item->layer) {
+            fprintf(stderr, "could not create layer surface for output %s\n",
+                    item->name[0] ? item->name : "(unnamed)");
+            wl_surface_destroy(item->surface);
+            item->surface = NULL;
+            return false;
+        }
         zwlr_layer_surface_v1_add_listener(item->layer, &layer_listener, item);
         zwlr_layer_surface_v1_set_anchor(item->layer,
             ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -877,14 +1216,22 @@ static bool create_output_surfaces(struct app *app) {
         wl_region_destroy(region);
         wl_surface_commit(item->surface);
     }
-    if (wl_display_roundtrip(app->display) < 0) return false;
+    if (app->output_count && wl_display_roundtrip(app->display) < 0) return false;
 
     app->min_x = app->min_y = 0;
     app->max_x = app->max_y = 1;
+    size_t configured_count = 0;
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
-        if (!item->configured || !item->width || !item->height) return false;
-        if (i == 0) {
+        if (!item->active) continue;
+        if (!item->configured || !item->width || !item->height) {
+            fprintf(stderr, "output %s is not configured yet (configured=%s, size=%dx%d)\n",
+                    item->name[0] ? item->name : "(unnamed)",
+                    item->configured ? "yes" : "no", item->width, item->height);
+            continue;
+        }
+        configured_count++;
+        if (configured_count == 1) {
             app->min_x = item->x; app->min_y = item->y;
             app->max_x = item->x + item->width; app->max_y = item->y + item->height;
         } else {
@@ -897,10 +1244,22 @@ static bool create_output_surfaces(struct app *app) {
 
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
+        if (!item->active) continue;
+        if (!item->configured || !item->width || !item->height) continue;
         item->egl_window = wl_egl_window_create(item->surface, item->width, item->height);
         item->egl_surface = eglCreateWindowSurface(app->egl_display, app->egl_config,
                                                     (EGLNativeWindowType)item->egl_window, NULL);
         if (item->egl_surface == EGL_NO_SURFACE) return false;
+        fprintf(stderr, "layer surface ready: %s %dx%d at %d,%d\n",
+                item->name[0] ? item->name : "(unnamed)",
+                item->width, item->height, item->x, item->y);
+    }
+    app->surfaces_need_reconcile = active_output_count(app) == 0 || configured_count != active_output_count(app);
+    if (configured_count == 0) {
+        fprintf(stderr, "no configured output surfaces; will retry on intro or new output\n");
+    }
+    if (app->program && app->render_scale < 0.999f && configured_count) {
+        if (!create_scaled_render_targets(app)) return false;
     }
     return true;
 }
@@ -913,6 +1272,8 @@ static bool create_scaled_render_targets(struct app *app) {
 
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
+        if (!item->active) continue;
+        if (item->egl_surface == EGL_NO_SURFACE || item->render_fbo) continue;
 
         item->render_width = (int32_t)((float)item->width * app->render_scale + 0.5f);
         item->render_height = (int32_t)((float)item->height * app->render_scale + 0.5f);
@@ -1014,8 +1375,17 @@ static void render(struct app *app, float seconds, float brightness, float visib
     bool snapshots_saved = true;
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
-        if (item->closed) continue;
-        eglMakeCurrent(app->egl_display, item->egl_surface, item->egl_surface, app->egl_context);
+        if (!item->active || !item->enabled || item->closed || item->egl_surface == EGL_NO_SURFACE)
+            continue;
+        if (!eglMakeCurrent(app->egl_display, item->egl_surface, item->egl_surface,
+                            app->egl_context)) {
+            fprintf(stderr, "could not make EGL surface current for output %s\n",
+                    item->name[0] ? item->name : "(unnamed)");
+            continue;
+        }
+        // Apply the non-blocking interval while this window surface is current;
+        // setting it on the compile pbuffer alone does not affect new surfaces.
+        eglSwapInterval(app->egl_display, 0);
 
         const bool scaled = app->render_scale < 0.999f && item->render_fbo != 0;
         const int render_width = scaled ? item->render_width : item->width;
@@ -1114,6 +1484,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, stop_handler);
     signal(SIGTERM, stop_handler);
     struct app app = {0};
+    app.events_fd = -1;
     app.colors[0] = app.target_colors[0] = environment_color_compat(
         "ORBIT_WALLPAPER_PRIMARY", "PS3_WAVE_PRIMARY", "#7AA2F7");
     app.colors[1] = app.target_colors[1] = environment_color_compat(
@@ -1184,6 +1555,18 @@ int main(int argc, char **argv) {
     } else {
         snprintf(app.control_path, sizeof(app.control_path), "%s/%s", home, DEFAULT_CONTROL_RELATIVE);
     }
+    const char *status_path = getenv("ORBIT_WALLPAPER_STATUS_FILE");
+    if (status_path && *status_path) {
+        snprintf(app.status_path, sizeof(app.status_path), "%s", status_path);
+    } else {
+        snprintf(app.status_path, sizeof(app.status_path), "%s/%s", home, DEFAULT_STATUS_RELATIVE);
+    }
+    const char *events_path = getenv("ORBIT_WALLPAPER_EVENTS_FILE");
+    if (events_path && *events_path) {
+        snprintf(app.events_path, sizeof(app.events_path), "%s", events_path);
+    } else {
+        snprintf(app.events_path, sizeof(app.events_path), "%s/%s", home, DEFAULT_EVENTS_RELATIVE);
+    }
     char *background_directory = strdup(app.background_path);
     if (background_directory) {
         char *separator = strrchr(background_directory, '/');
@@ -1201,6 +1584,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot open animation control: %s\n", app.control_path);
         return 1;
     }
+    char *events_directory = strdup(app.events_path);
+    if (events_directory) {
+        char *separator = strrchr(events_directory, '/');
+        if (separator) {
+            *separator = '\0';
+            mkdir(events_directory, 0755);
+        }
+        free(events_directory);
+    }
+    if (mkfifo(app.events_path, 0600) != 0 && errno != EEXIST) {
+        fprintf(stderr, "cannot create renderer events: %s\n", app.events_path);
+        return 1;
+    }
+    app.events_fd = open(app.events_path, O_RDWR | O_NONBLOCK);
+    if (app.events_fd < 0) {
+        fprintf(stderr, "cannot open renderer events: %s\n", app.events_path);
+        return 1;
+    }
+    write_status(&app, "starting", "initializing");
 
     char *fragment_source = read_file(shader_path);
     if (!fragment_source && strcmp(shader_path, default_shader_path) != 0) {
@@ -1216,18 +1618,31 @@ int main(int argc, char **argv) {
     fprintf(stderr, "using shader: %s\n", shader_path);
     app.display = wl_display_connect(NULL);
     if (!app.display) { fprintf(stderr, "cannot connect to Wayland\n"); free(fragment_source); return 1; }
+    fprintf(stderr, "Wayland connection established\n");
     struct wl_registry *registry = wl_display_get_registry(app.display);
     wl_registry_add_listener(registry, &registry_listener, &app);
-    if (wl_display_roundtrip(app.display) < 0 || !app.compositor || !app.layer_shell || !app.output_count) {
-        fprintf(stderr, "required Wayland globals are unavailable\n"); return 1;
+    if (wl_display_roundtrip(app.display) < 0 || !app.compositor || !app.layer_shell
+            || active_output_count(&app) == 0) {
+        fprintf(stderr,
+                "FATAL: required Wayland globals are unavailable: "
+                "wl_compositor=%s, zwlr_layer_shell_v1=%s, wl_output=%s\n",
+                app.compositor ? "present" : "missing",
+                app.layer_shell ? "present" : "missing",
+                active_output_count(&app) > 0 ? "present" : "missing");
+        write_status(&app, "unavailable", "error");
+        return 78;
     }
+    sync_output_enabled_state(&app);
+    fprintf(stderr, "Wayland discovery complete: %zu active output(s), output-management=%s\n",
+            active_output_count(&app), app.output_management_available ? "available" : "missing");
     if (!init_egl(&app) || !create_output_surfaces(&app)) {
         fprintf(stderr, "could not initialize renderer surfaces\n"); return 1;
     }
-    if (!eglMakeCurrent(app.egl_display, app.outputs[0].egl_surface,
-                        app.outputs[0].egl_surface, app.egl_context)) {
+    if (!eglMakeCurrent(app.egl_display, app.compile_surface,
+                        app.compile_surface, app.egl_context)) {
         fprintf(stderr, "could not make the EGL context current\n"); return 1;
     }
+    eglSwapInterval(app.egl_display, 0);
     char *prepared_source = prepare_fragment_shader(fragment_source);
     free(fragment_source);
     if (!prepared_source) {
@@ -1274,12 +1689,16 @@ int main(int argc, char **argv) {
     app.renderer_brightness = glGetUniformLocation(app.program, "u_orbit_renderer_brightness");
     read_palette(&app);
     enum animation_mode animation;
-    if (environment_value("ORBIT_WALLPAPER_START_HIDDEN", "PS3_WAVE_START_HIDDEN")) {
+    if (environment_bool_compat("ORBIT_WALLPAPER_START_HIDDEN", "PS3_WAVE_START_HIDDEN", false)) {
         animation = ANIMATION_HIDDEN;
     } else {
-        animation = environment_value("ORBIT_WALLPAPER_SKIP_INTRO", "PS3_WAVE_SKIP_INTRO")
+        animation = environment_bool_compat("ORBIT_WALLPAPER_SKIP_INTRO", "PS3_WAVE_SKIP_INTRO", false)
             ? ANIMATION_NORMAL : ANIMATION_INTRO;
     }
+    write_status(&app, surfaces_ready(&app) ? "ready" : "starting", animation_name(animation));
+    fprintf(stderr, "renderer readiness: %s (%zu/%zu output surfaces)\n",
+            surfaces_ready(&app) ? "ready" : "starting",
+            surface_count(&app), active_output_count(&app));
     double animation_started = monotonic_seconds();
     double motion_time = 0.0;
     double last_frame = animation_started;
@@ -1292,7 +1711,22 @@ int main(int argc, char **argv) {
     const double target_frame_seconds = 1.0 / (double)app.target_fps;
     while (running) {
         double frame_started = monotonic_seconds();
-        wl_display_dispatch_pending(app.display);
+        if (wl_display_dispatch_pending(app.display) < 0) {
+            fprintf(stderr, "Wayland dispatch failed\n");
+            break;
+        }
+        retire_removed_outputs(&app);
+        if (app.surfaces_need_reconcile) {
+            size_t before = surface_count(&app);
+            if (!create_output_surfaces(&app)) {
+                fprintf(stderr, "surface reconciliation failed; will retry\n");
+            } else if (surface_count(&app) != before || active_output_count(&app) == 0) {
+                fprintf(stderr, "surface reconciliation: %zu/%zu ready\n",
+                        surface_count(&app), active_output_count(&app));
+            }
+            write_status(&app, surfaces_ready(&app)
+                ? "ready" : "starting", animation_name(animation));
+        }
         wl_display_flush(app.display);
         double now = monotonic_seconds();
         double frame_delta = now - last_frame;
@@ -1301,6 +1735,17 @@ int main(int argc, char **argv) {
 
         int animation_request = read_animation_request(&app);
         if (animation_request == 1) {
+            size_t before = surface_count(&app);
+            if (!create_output_surfaces(&app)) {
+                fprintf(stderr, "intro surface recovery failed; will retry on a later intro\n");
+            }
+            if (before == 0 || surface_count(&app) == 0) {
+                fprintf(stderr, "intro received with zero surfaces (%zu output(s)); recovery attempted\n",
+                        active_output_count(&app));
+            } else if (surface_count(&app) != before) {
+                fprintf(stderr, "intro recovered surfaces: %zu/%zu ready\n",
+                        surface_count(&app), active_output_count(&app));
+            }
             // Session transitions must remain visible even if the resource
             // governor froze the normal wallpaper during a game.
             app.frozen = false;
@@ -1309,6 +1754,7 @@ int main(int argc, char **argv) {
             animation = ANIMATION_INTRO;
             animation_started = now;
             motion_time = 0.0;
+            write_status(&app, surfaces_ready(&app) ? "ready" : "starting", animation_name(animation));
             animation_request = 0;
         } else if (animation_request == 2) {
             app.frozen = false;
@@ -1316,11 +1762,14 @@ int main(int argc, char **argv) {
             app.recovery_since = 0.0;
             animation = ANIMATION_EXIT;
             animation_started = now;
+            write_status(&app, "ready", animation_name(animation));
             animation_request = 0;
         } else if (animation_request == 3) {
             app.palette_mtime = 0;
             read_palette(&app);
             last_palette = now;
+            emit_event(&app, "completed");
+            app.command_completion_emitted = true;
             animation_request = 0;
         }
 
@@ -1333,6 +1782,11 @@ int main(int argc, char **argv) {
             if (progress >= 1.0f) {
                 animation = ANIMATION_NORMAL;
                 animation_started = now;
+                if (!app.command_completion_emitted) {
+                    emit_event(&app, "completed");
+                    app.command_completion_emitted = true;
+                }
+                write_status(&app, "ready", animation_name(animation));
             } else {
                 if (progress < app.intro_reveal_end) {
                     visibility_value = progress / app.intro_reveal_end;
@@ -1360,6 +1814,11 @@ int main(int argc, char **argv) {
             if (progress >= 1.0f) {
                 animation = ANIMATION_HIDDEN;
                 visibility_value = 0.0f;
+                if (!app.command_completion_emitted) {
+                    emit_event(&app, "completed");
+                    app.command_completion_emitted = true;
+                }
+                write_status(&app, "ready", animation_name(animation));
             } else {
                 visibility_value = 1.0f - progress;
                 float eased = progress * progress * (3.0f - 2.0f * progress);
@@ -1450,9 +1909,12 @@ int main(int argc, char **argv) {
         sleep_seconds(target_frame_seconds - frame_work_seconds);
     }
     close(app.control_fd);
-    if (app.output_count && app.outputs[0].egl_surface != EGL_NO_SURFACE) {
-        eglMakeCurrent(app.egl_display, app.outputs[0].egl_surface,
-                       app.outputs[0].egl_surface, app.egl_context);
+    for (size_t i = 0; i < app.output_count; i++) {
+        if (app.outputs[i].active && app.outputs[i].egl_surface != EGL_NO_SURFACE) {
+            eglMakeCurrent(app.egl_display, app.outputs[i].egl_surface,
+                           app.outputs[i].egl_surface, app.egl_context);
+            break;
+        }
     }
     for (size_t i = 0; i < app.output_count; i++) {
         if (app.outputs[i].render_fbo) glDeleteFramebuffers(1, &app.outputs[i].render_fbo);
@@ -1461,6 +1923,7 @@ int main(int argc, char **argv) {
     if (app.blit_program) glDeleteProgram(app.blit_program);
     if (app.program) glDeleteProgram(app.program);
     eglMakeCurrent(app.egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (app.compile_surface != EGL_NO_SURFACE) eglDestroySurface(app.egl_display, app.compile_surface);
 
     for (size_t i = 0; i < app.output_count; i++) {
         if (app.outputs[i].egl_surface != EGL_NO_SURFACE) eglDestroySurface(app.egl_display, app.outputs[i].egl_surface);

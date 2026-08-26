@@ -1,0 +1,742 @@
+#!/usr/bin/env python3
+"""Frontend-neutral control adapter for Orbit Wallpaper Engine."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import select
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+
+API_VERSION = 1
+SERVICE = os.environ.get("ORBIT_WALLPAPER_SERVICE", "orbit-wallpaper-engine.service")
+APP = "orbit-wallpaper-engine"
+CONFIG_DIR = Path(os.environ.get(
+    "ORBIT_WALLPAPER_CONFIG_DIR",
+    Path.home() / ".config" / APP,
+))
+CONFIG_PATH = Path(os.environ.get("ORBIT_WALLPAPER_CONFIG_FILE", CONFIG_DIR / "config"))
+SHADER_DIR = CONFIG_DIR / "shaders"
+CACHE_DIR = Path(os.environ.get(
+    "XDG_CACHE_HOME", Path.home() / ".cache",
+)) / APP
+CONTROL_PATH = Path(os.environ.get(
+    "ORBIT_WALLPAPER_CONTROL_FILE", CACHE_DIR / "control",
+))
+STATUS_PATH = Path(os.environ.get(
+    "ORBIT_WALLPAPER_STATUS_FILE", CACHE_DIR / "status",
+))
+EVENTS_PATH = Path(os.environ.get(
+    "ORBIT_WALLPAPER_EVENTS_FILE", CACHE_DIR / "events",
+))
+STATE_PATH = Path(os.environ.get(
+    "ORBIT_WALLPAPER_CONTROL_STATE_FILE",
+    Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    / APP / "control-api-state.json",
+))
+HELPER = Path(os.environ.get(
+    "ORBIT_WALLPAPER_HELPER", Path(__file__).with_name("orbit-wallpaper-helper"),
+))
+
+ACCEPT_TIMEOUT = 0.5
+STATUS_TIMEOUT = 2.0
+PALETTE_TIMEOUT = 2.0
+INTRO_TIMEOUT = 8.0
+EXIT_TIMEOUT = 3.0
+RESTART_TIMEOUT = 10.0
+
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+FILENAME = re.compile(r"^[^/\\]+\.frag$")
+
+
+class APIError(Exception):
+    def __init__(self, code: str, message: str, *, details: object | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+CONFIG_SPECS: dict[str, dict[str, object]] = {
+    "ORBIT_WALLPAPER_SHADER": {"kind": "shader", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_DURATION": {"kind": "float", "minimum": 0.1, "maximum": 60.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_EXIT_DURATION": {"kind": "float", "minimum": 0.1, "maximum": 60.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_PEAK_SPEED": {"kind": "float", "minimum": 0.01, "maximum": 1000.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_PEAK_START": {"kind": "float", "minimum": 0.0, "maximum": 0.99, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_PEAK_END": {"kind": "float", "minimum": 0.01, "maximum": 1.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_REVEAL_END": {"kind": "float", "minimum": 0.01, "maximum": 1.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_INTRO_DECAY": {"kind": "float", "minimum": 0.01, "maximum": 100.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_PALETTE_STRENGTH": {"kind": "float", "minimum": 0.0, "maximum": 1.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_PEAK_BRIGHTNESS": {"kind": "float", "minimum": 0.0, "maximum": 4.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_TARGET_FPS": {"kind": "float", "minimum": 1.0, "maximum": 240.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_RENDER_SCALE": {"kind": "float", "minimum": 0.25, "maximum": 1.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_SPEED": {"kind": "float", "minimum": 0.0, "maximum": 4.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_RESOURCE_GOVERNOR": {"kind": "bool", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER": {"kind": "float", "minimum": 1.0, "maximum": 100.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT": {"kind": "float", "minimum": 0.0, "maximum": 100.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_PRIMARY": {"kind": "color", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_SECONDARY": {"kind": "color", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_SURFACE": {"kind": "color", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_ERROR": {"kind": "color", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE": {"kind": "bool", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_PALETTE_FILE": {"kind": "path", "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_SKIP_INTRO": {"kind": "bool", "classification": "STARTUP_ONLY"},
+    "ORBIT_WALLPAPER_START_HIDDEN": {"kind": "bool", "classification": "STARTUP_ONLY"},
+    "ORBIT_WALLPAPER_DISABLE_SNAPSHOTS": {"kind": "bool", "classification": "INTERNAL"},
+    "ORBIT_WALLPAPER_DEBUG_FRAMES": {"kind": "bool", "classification": "INTERNAL"},
+}
+
+
+def result(**fields: object) -> dict:
+    return {"ok": True, "api_version": API_VERSION, **fields}
+
+
+def error_result(error: APIError) -> dict:
+    value: dict[str, object] = {"code": error.code, "message": error.message}
+    if error.details is not None:
+        value["details"] = error.details
+    return {"ok": False, "api_version": API_VERSION, "error": value}
+
+
+def atomic_write(path: Path, text: str, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def load_json(path: Path, fallback: dict) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return dict(fallback)
+    return value if isinstance(value, dict) else dict(fallback)
+
+
+def save_state(state: dict) -> None:
+    atomic_write(STATE_PATH, json.dumps(state, sort_keys=True) + "\n")
+
+
+def parse_config(text: str) -> tuple[list[str], dict[str, str]]:
+    lines = text.splitlines()
+    values: dict[str, str] = {}
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in line:
+            raise APIError("invalid_config", f"Malformed configuration line {number}")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise APIError("invalid_config", f"Malformed configuration line {number}")
+        values[key] = value.strip()
+    return lines, values
+
+
+def read_config() -> tuple[str, dict[str, str]]:
+    try:
+        text = CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        raise APIError("invalid_config", f"Could not read configuration: {exc}") from exc
+    parse_config(text)
+    return text, parse_config(text)[1]
+
+
+def validate_value(key: str, value: str) -> str:
+    spec = CONFIG_SPECS.get(key)
+    if spec is None or spec["classification"] != "RESTART_REQUIRED":
+        raise APIError("invalid_config", f"Configuration key is not a normal frontend setting: {key}")
+    kind = spec["kind"]
+    if kind == "shader":
+        if value and not FILENAME.fullmatch(value):
+            raise APIError("invalid_config", f"Invalid shader filename: {value}")
+    elif kind == "bool":
+        if value.lower() not in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
+            raise APIError("invalid_config", f"Invalid boolean for {key}: {value}")
+    elif kind == "color":
+        if not HEX_COLOR.fullmatch(value):
+            raise APIError("invalid_config", f"Invalid colour for {key}: {value}")
+    elif kind == "float":
+        try:
+            number = float(value)
+        except ValueError as exc:
+            raise APIError("invalid_config", f"Invalid number for {key}: {value}") from exc
+        if number < float(spec["minimum"]) or number > float(spec["maximum"]):
+            raise APIError("invalid_config", f"Value outside range for {key}: {value}")
+    elif kind == "path" and value and not value.startswith("/"):
+        raise APIError("invalid_config", f"Palette path must be absolute: {value}")
+    return value
+
+
+def update_config(text: str, updates: dict[str, str]) -> str:
+    lines, _ = parse_config(text)
+    output: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        raw = line.strip()
+        key = raw.split("=", 1)[0].strip() if "=" in raw and not raw.startswith("#") else ""
+        if key in updates:
+            if key not in seen:
+                output.append(f"{key}={updates[key]}")
+                seen.add(key)
+            continue
+        output.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            if output and output[-1].strip():
+                output.append("")
+            output.append(f"{key}={value}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def stage_config(updates: dict[str, str]) -> dict:
+    text, current = read_config()
+    for key, value in updates.items():
+        updates[key] = validate_value(key, value)
+    candidate = {**current, **updates}
+    try:
+        peak_start = float(candidate["ORBIT_WALLPAPER_INTRO_PEAK_START"])
+        peak_end = float(candidate["ORBIT_WALLPAPER_INTRO_PEAK_END"])
+        if peak_end <= peak_start:
+            raise APIError("invalid_config", "Intro peak end must be greater than peak start")
+    except KeyError:
+        pass
+    try:
+        pressure_enter = float(candidate["ORBIT_WALLPAPER_GPU_PRESSURE_ENTER"])
+        pressure_exit = float(candidate["ORBIT_WALLPAPER_GPU_PRESSURE_EXIT"])
+        if pressure_exit > pressure_enter:
+            raise APIError("invalid_config", "GPU pressure exit must not exceed pressure enter")
+    except KeyError:
+        pass
+    state = load_json(STATE_PATH, {"pending": {}})
+    pending = state.get("pending", {})
+    if not isinstance(pending, dict):
+        pending = {}
+    if not pending:
+        state["previous_config"] = text
+    pending.update(updates)
+    state["pending"] = pending
+    state["restart_required"] = bool(pending)
+    save_state(state)
+    return result(staged=sorted(updates), restart_required=True, pending_changes=sorted(pending))
+
+
+def command_timeout(command: str) -> float:
+    key = {
+        "intro": "ORBIT_WALLPAPER_INTRO_DURATION",
+        "exit": "ORBIT_WALLPAPER_EXIT_DURATION",
+    }.get(command)
+    fallback = {"intro": INTRO_TIMEOUT, "exit": EXIT_TIMEOUT}.get(command, STATUS_TIMEOUT)
+    if not key:
+        return fallback
+    try:
+        return max(fallback, float(config_values().get(key, 0.0)) + 2.0)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def service_properties() -> dict[str, str]:
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "show", SERVICE, "--no-pager",
+             "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "Environment"],
+            check=False, capture_output=True, text=True, timeout=STATUS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    values: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    return values
+
+
+def status_values() -> dict[str, str]:
+    try:
+        lines = STATUS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for line in lines:
+        if "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+    return values
+
+
+def config_values() -> dict[str, str]:
+    try:
+        return read_config()[1]
+    except APIError:
+        return {}
+
+
+def environment_value(environment: str, key: str) -> str | None:
+    for entry in environment.split():
+        if entry.startswith(f"{key}="):
+            return entry.split("=", 1)[1]
+    return None
+
+
+def bool_value(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def renderer_version() -> str | None:
+    candidates = []
+    explicit = os.environ.get("ORBIT_WALLPAPER_VERSION_FILE")
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path(__file__).resolve().parent.parent / "VERSION")
+    for path in candidates:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return None
+
+
+def command_state() -> dict:
+    state = load_json(STATE_PATH, {})
+    return state if isinstance(state, dict) else {}
+
+
+def status_command() -> dict:
+    service = service_properties()
+    raw_status = status_values()
+    config = config_values()
+    state = command_state()
+    active = service.get("ActiveState") == "active"
+    pending = state.get("pending", {})
+    if not isinstance(pending, dict):
+        pending = {}
+    readiness = raw_status.get("readiness", "unknown") if active else "unavailable"
+    surfaces = raw_status.get("surfaces", "")
+    active_surfaces = None
+    output_count = None
+    if "/" in surfaces:
+        left, right = surfaces.split("/", 1)
+        try:
+            active_surfaces, output_count = int(left), int(right)
+        except ValueError:
+            pass
+    environment = service.get("Environment", "")
+    follow = environment_value(environment, "ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE")
+    palette_source = environment_value(environment, "ORBIT_WALLPAPER_PALETTE_FILE")
+    if follow is None:
+        follow = config.get("ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE")
+    if palette_source is None:
+        palette_source = config.get("ORBIT_WALLPAPER_PALETTE_FILE")
+    return result(
+        renderer={
+            "version": renderer_version(),
+            "service": SERVICE,
+            "state": service.get("ActiveState", "unknown"),
+            "substate": service.get("SubState", "unknown"),
+            "pid": int(service["MainPID"]) if service.get("MainPID", "").isdigit() else None,
+        },
+        readiness=readiness,
+        outputs={"count": output_count, "active_surfaces": active_surfaces},
+        shader={"active": config.get("ORBIT_WALLPAPER_SHADER") or "wave.frag"},
+        animation=raw_status.get("animation", "unknown"),
+        palette={"follow_system": bool_value(follow), "source": palette_source},
+        configuration={"restart_required": bool(pending), "pending_changes": sorted(pending)},
+        last_command=state.get("last_command"),
+        last_error=state.get("last_error"),
+    )
+
+
+def fifo_command(command: str, identifier: str | None, timeout: float) -> dict:
+    try:
+        control_is_fifo = stat.S_ISFIFO(os.stat(CONTROL_PATH).st_mode)
+        events_is_fifo = stat.S_ISFIFO(os.stat(EVENTS_PATH).st_mode)
+    except OSError as exc:
+        raise APIError("fifo_unavailable", f"Renderer control or events FIFO is unavailable: {exc}") from exc
+    if not control_is_fifo or not events_is_fifo:
+        raise APIError("fifo_unavailable", "Renderer control or events FIFO is unavailable")
+    command_id = identifier or f"control-{uuid.uuid4().hex}"
+    line = f"{command} {command_id}\n".encode()
+    events_fd = None
+    control_fd = None
+    started = time.monotonic()
+    accepted = False
+    buffer = b""
+    try:
+        events_fd = os.open(EVENTS_PATH, os.O_RDONLY | os.O_NONBLOCK)
+        control_fd = os.open(CONTROL_PATH, os.O_WRONLY | os.O_NONBLOCK)
+        written = 0
+        write_deadline = time.monotonic() + ACCEPT_TIMEOUT
+        while written < len(line):
+            remaining = write_deadline - time.monotonic()
+            if remaining <= 0:
+                raise APIError("fifo_write_timeout", "Timed out writing renderer command")
+            try:
+                written += os.write(control_fd, line[written:])
+            except BlockingIOError:
+                select.select([], [control_fd], [], remaining)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([events_fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(events_fd, 4096)
+            if not chunk:
+                continue
+            buffer += chunk
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                fields = dict(part.split("=", 1) for part in raw.decode(errors="replace").split() if "=" in part)
+                if fields.get("id") != command_id or fields.get("command") != command:
+                    continue
+                phase = fields.get("phase")
+                if phase == "accepted":
+                    accepted = True
+                elif phase == "completed" and accepted:
+                    payload = {"command": command, "id": command_id, "result": "completed", "elapsed_ms": int((time.monotonic() - started) * 1000)}
+                    record_command(payload, None)
+                    return result(**payload)
+        code = "command_completion_timeout" if accepted else "command_accept_timeout"
+        message = "Timed out waiting for command completion" if accepted else "Timed out waiting for command acceptance"
+        payload = {"command": command, "id": command_id, "result": "failed"}
+        record_command(payload, {"code": code, "message": message})
+        raise APIError(code, message)
+    except FileNotFoundError as exc:
+        raise APIError("fifo_unavailable", f"Renderer FIFO is unavailable: {exc}") from exc
+    except OSError as exc:
+        raise APIError("fifo_unavailable", f"Could not access renderer FIFO: {exc}") from exc
+    finally:
+        if events_fd is not None:
+            os.close(events_fd)
+        if control_fd is not None:
+            os.close(control_fd)
+
+
+def record_command(command: dict, error: dict | None) -> None:
+    state = command_state()
+    state["last_command"] = command
+    state["last_error"] = error
+    save_state(state)
+
+
+def restart_renderer(*, replay_intro: bool = False, clear_pending: bool = True) -> dict:
+    try:
+        completed = subprocess.run(
+            ["systemctl", "--user", "restart", SERVICE],
+            check=False, capture_output=True, text=True, timeout=STATUS_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise APIError("restart_failed", f"Could not restart renderer: {exc}") from exc
+    if completed.returncode != 0:
+        raise APIError("restart_failed", completed.stderr.strip() or "Renderer restart failed")
+    deadline = time.monotonic() + RESTART_TIMEOUT
+    while time.monotonic() < deadline:
+        current = status_command()
+        if current["renderer"]["state"] == "active" and current["readiness"] == "ready":
+            if clear_pending:
+                state = command_state()
+                state["pending"] = {}
+                state["restart_required"] = False
+                state.pop("previous_config", None)
+                save_state(state)
+            response: dict = result(restarted=True, status=current)
+            if replay_intro:
+                response["intro"] = fifo_command("intro", None, command_timeout("intro"))
+            return response
+        time.sleep(0.1)
+    raise APIError("restart_failed", "Renderer did not become ready after restart")
+
+
+def apply_pending_config() -> dict:
+    state = command_state()
+    pending = state.get("pending", {})
+    if not isinstance(pending, dict) or not pending:
+        return result(applied=False, restart_required=False, status=status_command())
+
+    previous_config = state.get("previous_config")
+    try:
+        current_config, _ = read_config()
+        if isinstance(previous_config, str):
+            current_config = previous_config
+        staged_config = update_config(current_config, pending)
+        exit_result = fifo_command("exit", None, command_timeout("exit"))
+        try:
+            atomic_write(CONFIG_PATH, staged_config)
+        except OSError as error:
+            raise APIError("apply_failed", f"Could not persist the new configuration: {error}") from error
+        restarted = restart_renderer(replay_intro=False, clear_pending=False)
+        intro = fifo_command("intro", None, command_timeout("intro"))
+        state = command_state()
+        state["pending"] = {}
+        state["restart_required"] = False
+        state.pop("previous_config", None)
+        save_state(state)
+        return result(applied=True, restart_required=False, exit=exit_result,
+                      restart=restarted, intro=intro)
+    except APIError as error:
+        recovery_error = None
+        if isinstance(previous_config, str):
+            try:
+                atomic_write(CONFIG_PATH, previous_config)
+                state = command_state()
+                state["pending"] = {}
+                state["restart_required"] = False
+                state.pop("previous_config", None)
+                save_state(state)
+                restart_renderer(replay_intro=True, clear_pending=False)
+            except APIError as recovery:
+                recovery_error = recovery
+        if recovery_error:
+            raise APIError(
+                "apply_recovery_failed",
+                f"Configuration apply failed ({error.message}); recovery failed ({recovery_error.message})",
+            ) from recovery_error
+        raise APIError("apply_failed", f"Configuration apply failed and was restored: {error.message}") from error
+
+
+def run_helper(arguments: list[str], *, timeout: float = 120.0) -> dict:
+    try:
+        completed = subprocess.run([str(HELPER), *arguments], check=False, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise APIError("catalogue_failure", f"Shader helper failed: {exc}") from exc
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise APIError("catalogue_failure", completed.stderr.strip() or "Shader helper returned invalid JSON") from exc
+    if completed.returncode != 0 or payload.get("ok") is False:
+        raise APIError("catalogue_failure", payload.get("error", "Shader helper failed"))
+    return payload
+
+
+def shader_list_installed() -> dict:
+    shaders = []
+    if SHADER_DIR.is_dir():
+        shaders = sorted(path.name for path in SHADER_DIR.iterdir() if path.is_file() and path.suffix == ".frag")
+    return result(shaders=shaders, directory=str(SHADER_DIR))
+
+
+def shader_catalogue(refresh: bool) -> dict:
+    arguments = ["shader-catalog"]
+    if refresh:
+        arguments.append("--refresh")
+    payload = run_helper(arguments)
+    payload.pop("ok", None)
+    return result(**payload)
+
+
+def shader_inspect(shader_id: str) -> dict:
+    payload = run_helper(["shader-catalog", "--include-unlicensed"])
+    item = next((entry for entry in payload.get("shaders", []) if entry.get("id") == shader_id), None)
+    if item is None:
+        raise APIError("catalogue_failure", f"Unknown shader id: {shader_id}")
+    return result(shader=item)
+
+
+def shader_install(shader_id: str) -> dict:
+    try:
+        payload = run_helper(["shader-install", shader_id])
+    except APIError as exc:
+        raise APIError("shader_install_failed", exc.message) from exc
+    return result(**{key: value for key, value in payload.items() if key != "ok"})
+
+
+def shader_apply(shader_id: str, replay_intro: bool) -> dict:
+    lock_path = STATE_PATH.with_name("shader-apply.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise APIError("shader_apply_busy", "Another shader Install & Apply operation is already running") from exc
+        try:
+            return _shader_apply_locked(shader_id)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def _shader_apply_locked(shader_id: str) -> dict:
+    try:
+        installed = run_helper(["shader-install", shader_id])
+    except APIError as exc:
+        raise APIError("shader_apply_failed", exc.message) from exc
+    filename = installed.get("filename")
+    if not filename or not FILENAME.fullmatch(str(filename)):
+        raise APIError("shader_apply_failed", "Shader helper returned an invalid installed filename")
+    installed_path = SHADER_DIR / str(filename)
+    if not installed_path.is_file():
+        raise APIError("shader_apply_failed", f"Installed shader file is missing: {installed_path}")
+    original_text, _ = read_config()
+    original_state = command_state()
+    apply_completed = False
+    try:
+        stage_config({"ORBIT_WALLPAPER_SHADER": str(filename)})
+        applied = apply_pending_config()
+        apply_completed = True
+        active = applied.get("restart", {}).get("status", {}).get("shader", {}).get("active")
+        if active != str(filename):
+            raise APIError("shader_apply_failed", f"Renderer did not activate {filename}")
+        return result(shader=installed, applied=True, restart=applied)
+    except APIError as exc:
+        if not apply_completed:
+            raise APIError("shader_apply_failed", f"Shader failed to load and was rolled back: {exc.message}") from exc
+        try:
+            atomic_write(CONFIG_PATH, original_text)
+            save_state(original_state)
+            restart_renderer(replay_intro=True, clear_pending=False)
+        except APIError as rollback_error:
+            raise APIError("rollback_failed", f"Shader apply failed ({exc.message}); rollback failed ({rollback_error.message})") from rollback_error
+        raise APIError("shader_apply_failed", f"Shader apply failed and was rolled back: {exc.message}") from exc
+
+
+def shader_cycle(direction: int) -> dict:
+    installed = shader_list_installed()["shaders"]
+    if not installed:
+        raise APIError("shader_cycle_failed", "No installed shaders available")
+    _, values = read_config()
+    current = values.get("ORBIT_WALLPAPER_SHADER")
+    try:
+        index = installed.index(current)
+    except ValueError:
+        index = -1 if direction > 0 else 0
+    next_index = (index + direction) % len(installed)
+    return shader_apply(installed[next_index], replay_intro=False)
+
+
+def config_get() -> dict:
+    _, values = read_config()
+    state = command_state()
+    settings = {
+        key: {"value": values.get(key), "classification": spec["classification"]}
+        for key, spec in CONFIG_SPECS.items() if key in values
+    }
+    pending = state.get("pending", {})
+    if not isinstance(pending, dict):
+        pending = {}
+    return result(config=str(CONFIG_PATH), settings=settings, restart_required=bool(pending), pending_changes=sorted(pending))
+
+
+def dispatch(arguments: argparse.Namespace) -> dict:
+    if arguments.command == "status":
+        return status_command()
+    if arguments.command in {"intro", "exit", "palette"}:
+        timeout = command_timeout(arguments.command)
+        return fifo_command(arguments.command, arguments.id, timeout)
+    if arguments.command == "config-get":
+        return config_get()
+    if arguments.command == "config-set":
+        if len(arguments.pairs) == 0 or len(arguments.pairs) % 2:
+            raise APIError("invalid_config", "config set requires KEY VALUE pairs")
+        updates = dict(zip(arguments.pairs[::2], arguments.pairs[1::2]))
+        return stage_config(updates)
+    if arguments.command == "config-apply":
+        return apply_pending_config()
+    if arguments.command == "restart":
+        return restart_renderer(replay_intro=arguments.intro, clear_pending=True)
+    if arguments.command == "shader-list-installed":
+        return shader_list_installed()
+    if arguments.command == "shader-catalogue":
+        return shader_catalogue(arguments.refresh)
+    if arguments.command == "shader-inspect":
+        return shader_inspect(arguments.shader_id)
+    if arguments.command == "shader-install":
+        return shader_install(arguments.shader_id)
+    if arguments.command == "shader-apply":
+        return shader_apply(arguments.shader_id, arguments.intro)
+    if arguments.command == "shader-previous":
+        return shader_cycle(-1)
+    if arguments.command == "shader-next":
+        return shader_cycle(1)
+    raise APIError("invalid_command", "Unknown control command")
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(prog="orbit-wallpaper-control")
+    sub = root.add_subparsers(dest="command", required=True)
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
+    for name in ("intro", "exit", "palette"):
+        command = sub.add_parser(name)
+        command.add_argument("--id")
+    config = sub.add_parser("config")
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_get_parser = config_sub.add_parser("get")
+    config_get_parser.add_argument("--json", action="store_true")
+    config_get_parser.set_defaults(command="config-get")
+    config_set = config_sub.add_parser("set")
+    config_set.add_argument("pairs", nargs="+")
+    config_set.set_defaults(command="config-set")
+    config_sub.add_parser("apply").set_defaults(command="config-apply")
+    restart = sub.add_parser("restart")
+    restart.add_argument("--intro", action="store_true")
+    shader = sub.add_parser("shader")
+    shader_sub = shader.add_subparsers(dest="shader_command", required=True)
+    list_installed = shader_sub.add_parser("list-installed")
+    list_installed.add_argument("--json", action="store_true")
+    list_installed.set_defaults(command="shader-list-installed")
+    catalogue = shader_sub.add_parser("catalogue")
+    catalogue.add_argument("--refresh", action="store_true")
+    catalogue.add_argument("--json", action="store_true")
+    catalogue.set_defaults(command="shader-catalogue")
+    inspect = shader_sub.add_parser("inspect")
+    inspect.add_argument("shader_id")
+    inspect.add_argument("--json", action="store_true")
+    inspect.set_defaults(command="shader-inspect")
+    install = shader_sub.add_parser("install")
+    install.add_argument("shader_id")
+    install.set_defaults(command="shader-install")
+    apply = shader_sub.add_parser("apply")
+    apply.add_argument("shader_id")
+    apply.add_argument("--intro", action="store_true")
+    apply.set_defaults(command="shader-apply")
+    shader_sub.add_parser("previous").set_defaults(command="shader-previous")
+    shader_sub.add_parser("next").set_defaults(command="shader-next")
+    return root
+
+
+def main() -> int:
+    try:
+        arguments = parser().parse_args()
+        print(json.dumps(dispatch(arguments), sort_keys=True))
+        return 0
+    except APIError as exc:
+        print(json.dumps(error_result(exc), sort_keys=True))
+        return 1
+    except (OSError, ValueError) as exc:
+        print(json.dumps(error_result(APIError("internal_error", str(exc))), sort_keys=True))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

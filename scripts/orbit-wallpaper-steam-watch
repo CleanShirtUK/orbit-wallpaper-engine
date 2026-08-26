@@ -8,7 +8,6 @@ sends `intro`.
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -16,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 STEAM_CLASS = re.compile(r"^steam_app_\d+$", re.IGNORECASE)
@@ -25,32 +25,93 @@ CONTROL = Path(os.environ.get(
     "ORBIT_WALLPAPER_CONTROL_FILE",
     CACHE / "orbit-wallpaper-engine" / "control",
 ))
+RECONNECT_DELAY_SECONDS = 1.0
+UNAVAILABLE_RETRY_DELAY_SECONDS = 5.0
+UNAVAILABLE_LOG_INTERVAL_SECONDS = 30.0
+MAX_CONNECTION_FAILURES = 5
+
+
+@dataclass(frozen=True)
+class DiscoveryResult:
+    kind: str
+    instance: tuple[str, Path] | None = None
+    detail: str = ""
 
 
 def log(message: str) -> None:
     print(f"orbit-wallpaper-steam-watch: {message}", file=sys.stderr, flush=True)
 
 
-def find_instance() -> tuple[str, Path] | None:
-    preferred = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "").strip()
-    if preferred:
-        path = RUNTIME / "hypr" / preferred / ".socket2.sock"
-        if path.exists():
-            return preferred, path
+def find_instance() -> DiscoveryResult:
+    """Resolve the current Hyprland instance without trusting inherited state."""
+    env = os.environ.copy()
+    env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+    try:
+        proc = subprocess.run(
+            ["hyprctl", "instances", "-j"],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if proc.returncode != 0:
+            detail = proc.stdout.strip() or f"hyprctl exit {proc.returncode}"
+            normalized = detail.lower()
+            absence_markers = (
+                "not running",
+                "no instance",
+                "no instances",
+                "not found",
+                "connection refused",
+            )
+            if not proc.stdout.strip() or detail == "[]" or any(
+                    marker in normalized for marker in absence_markers):
+                return DiscoveryResult("unavailable", detail=detail[:200])
+            return DiscoveryResult("transient_malformed", detail=f"hyprctl exit {proc.returncode}: {detail[:200]}")
+        raw_output = proc.stdout.strip()
+        if not raw_output:
+            return DiscoveryResult("unavailable", detail="hyprctl returned empty output")
+        instances = json.loads(raw_output)
+    except subprocess.TimeoutExpired:
+        return DiscoveryResult("unavailable", detail="hyprctl timed out")
+    except json.JSONDecodeError as error:
+        detail = repr(proc.stdout.strip()[:200]) if "proc" in locals() else str(error)
+        return DiscoveryResult("transient_malformed", detail=f"invalid JSON: {detail}")
+    except OSError as error:
+        return DiscoveryResult("fatal", detail=f"cannot execute hyprctl: {error}")
 
-    candidates = []
-    for value in glob.glob(str(RUNTIME / "hypr" / "*" / ".socket2.sock")):
-        path = Path(value)
-        try:
-            candidates.append((path.stat().st_mtime, path.parent.name, path))
-        except OSError:
-            pass
+    if not isinstance(instances, list) or not instances:
+        return DiscoveryResult("unavailable", detail="no running Hyprland instance")
 
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    matching = [
+        item for item in instances
+        if isinstance(item, dict) and item.get("wl_socket") == wayland_display
+    ]
+    candidates = matching or [item for item in instances if isinstance(item, dict)]
     if not candidates:
-        return None
+        return DiscoveryResult("transient_malformed", detail="instance list contained no objects")
 
-    _, signature, path = max(candidates)
-    return signature, path
+    def instance_time(item: dict) -> int:
+        try:
+            return int(item.get("time", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    selected = max(candidates, key=instance_time)
+    signature = str(selected.get("instance", "")).strip()
+    if not signature:
+        return DiscoveryResult("transient_malformed", detail="selected instance has no signature")
+
+    event_socket = RUNTIME / "hypr" / signature / ".socket2.sock"
+    if not event_socket.is_socket():
+        return DiscoveryResult(
+            "socket_missing",
+            detail=f"current instance {signature} has no event socket at {event_socket}",
+        )
+
+    return DiscoveryResult("available", (signature, event_socket))
 
 
 def send_control(command: str) -> None:
@@ -78,6 +139,7 @@ def initial_games(signature: str) -> set[str]:
             return set()
         clients = json.loads(proc.stdout)
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        log(f"could not query clients for Hyprland instance {signature}")
         return set()
 
     games: set[str] = set()
@@ -92,58 +154,121 @@ def initial_games(signature: str) -> set[str]:
 
 
 def watch(signature: str, event_socket: Path) -> None:
-    games = initial_games(signature)
-    if games:
-        send_control("exit")
-
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(str(event_socket))
-    reader = sock.makefile("r", encoding="utf-8", errors="replace")
+    try:
+        log(f"connecting to Hyprland instance {signature} at {event_socket}")
+        sock.connect(str(event_socket))
+        log(f"connected to Hyprland instance {signature}")
+        games = initial_games(signature)
+        if games:
+            send_control("exit")
 
-    log(f"watching Hyprland instance {signature}")
+        with sock.makefile("r", encoding="utf-8", errors="replace") as reader:
+            for raw in reader:
+                line = raw.rstrip("\n")
+                event, separator, data = line.partition(">>")
+                if not separator:
+                    continue
 
-    for raw in reader:
-        line = raw.rstrip("\n")
-        event, separator, data = line.partition(">>")
-        if not separator:
-            continue
+                if event == "openwindow":
+                    parts = data.split(",", 3)
+                    if len(parts) < 3:
+                        continue
+                    address = parts[0].lower().removeprefix("0x")
+                    window_class = parts[2]
+                    if not STEAM_CLASS.match(window_class):
+                        continue
+                    was_empty = not games
+                    games.add(address)
+                    log(f"Steam game opened: {window_class} ({address})")
+                    if was_empty:
+                        send_control("exit")
 
-        if event == "openwindow":
-            parts = data.split(",", 3)
-            if len(parts) < 3:
-                continue
-            address = parts[0].lower().removeprefix("0x")
-            window_class = parts[2]
-            if STEAM_CLASS.match(window_class):
-                was_empty = not games
-                games.add(address)
-                log(f"Steam game opened: {window_class} ({address})")
-                if was_empty:
-                    send_control("exit")
-
-        elif event == "closewindow":
-            address = data.lower().removeprefix("0x")
-            if address in games:
-                games.remove(address)
-                log(f"Steam game closed: {address}")
-                if not games:
-                    send_control("intro")
+                elif event == "closewindow":
+                    address = data.lower().removeprefix("0x")
+                    if address not in games:
+                        continue
+                    games.remove(address)
+                    log(f"Steam game closed: {address}")
+                    if not games:
+                        send_control("intro")
+            raise ConnectionError("Hyprland event socket closed")
+    finally:
+        sock.close()
+        log(f"disconnected from Hyprland instance {signature}; will rediscover")
 
 
-def main() -> None:
+def main() -> int:
+    last_instance = None
+    connection_failures = 0
+    state = ""
+    unavailable_detail = ""
+    unavailable_logged_at = 0.0
+    malformed_detail = ""
+    malformed_logged_at = 0.0
+
+    def announce(next_state: str, message: str) -> None:
+        nonlocal state
+        if state != next_state:
+            log(message)
+            state = next_state
+
     while True:
-        found = find_instance()
-        if not found:
-            time.sleep(2)
+        announce("discovering", "discovering current Hyprland instance")
+        result = find_instance()
+        if result.kind == "unavailable":
+            now = time.monotonic()
+            if (result.detail != unavailable_detail or
+                    now - unavailable_logged_at >= UNAVAILABLE_LOG_INTERVAL_SECONDS):
+                log(f"Hyprland unavailable; waiting before rediscovery ({result.detail})")
+                unavailable_detail = result.detail
+                unavailable_logged_at = now
+            time.sleep(UNAVAILABLE_RETRY_DELAY_SECONDS)
             continue
 
-        signature, event_socket = found
+        if result.kind == "transient_malformed":
+            now = time.monotonic()
+            if (result.detail != malformed_detail or
+                    now - malformed_logged_at >= UNAVAILABLE_LOG_INTERVAL_SECONDS):
+                log(f"Hyprland discovery output is temporarily malformed; waiting before rediscovery ({result.detail})")
+                malformed_detail = result.detail
+                malformed_logged_at = now
+            time.sleep(UNAVAILABLE_RETRY_DELAY_SECONDS)
+            continue
+
+        if result.kind == "fatal":
+            log(f"unrecoverable error: {result.detail}")
+            return 1
+
+        if result.kind == "socket_missing":
+            connection_failures += 1
+            log(f"current Hyprland instance is missing its event socket ({connection_failures}/{MAX_CONNECTION_FAILURES}): {result.detail}")
+            if connection_failures >= MAX_CONNECTION_FAILURES:
+                log("unrecoverable error: repeated missing Hyprland event socket")
+                return 1
+            time.sleep(RECONNECT_DELAY_SECONDS)
+            continue
+
+        signature, event_socket = result.instance
+        announce("connecting", f"selected Hyprland instance {signature}; event socket {event_socket}")
+        if last_instance and last_instance != signature:
+            log(f"Hyprland instance changed from {last_instance} to {signature}; reconnecting")
+        last_instance = signature
         try:
             watch(signature, event_socket)
         except (OSError, BrokenPipeError) as error:
-            log(f"Hyprland event connection lost: {error}")
-            time.sleep(1)
+            connection_failures += 1
+            log(f"disconnected from Hyprland event socket: {error}; reconnecting")
+            if connection_failures >= MAX_CONNECTION_FAILURES:
+                log("unrecoverable error: repeated Hyprland event connection failures")
+                return 1
+            time.sleep(RECONNECT_DELAY_SECONDS)
+        else:
+            connection_failures = 0
+            time.sleep(RECONNECT_DELAY_SECONDS)
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

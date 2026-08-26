@@ -1,26 +1,35 @@
 [Unit]
 Description=Orbit Wallpaper Engine
 PartOf=hyprland-session.target
-After=hyprland-session.target
+After=graphical-session-pre.target
 
 [Service]
 ExecStartPre=/usr/bin/mkdir -p %h/.cache/orbit-wallpaper-engine
 ExecStart=%h/.local/bin/orbit-wallpaper-engine
 
-# Reloading the service means "play the intro animation again".
-# This does NOT affect normal login startup: the renderer still starts hidden
-# and waits for Quickshell to send its usual intro command.
-ExecReload=/usr/bin/sh -c '/usr/bin/printf "intro\n" > "%h/.cache/orbit-wallpaper-engine/control"'
+# Reloading the service means "play the intro animation again" through the
+# authoritative, timeout-bounded control API.
+ExecReload=%h/.local/bin/orbit-wallpaper-control intro
 
 EnvironmentFile=-%h/.config/orbit-wallpaper-engine/config
+# The session integration sends the login/unlock intro after the compositor and
+# frontend are ready. A service restart remains hidden until an explicit intro.
+Environment=ORBIT_WALLPAPER_START_HIDDEN=1
 Environment=ORBIT_WALLPAPER_DISABLE_SNAPSHOTS=1
+Environment=ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE=1
+Environment=ORBIT_WALLPAPER_PALETTE_FILE=%h/.config/noctalia/wallpaper-palette.lua
 Environment=ORBIT_WALLPAPER_BACKGROUND_FILE=%h/.cache/orbit-wallpaper-engine/hyprlock-background.conf
 Environment=ORBIT_WALLPAPER_CONTROL_FILE=%h/.cache/orbit-wallpaper-engine/control
+Environment=ORBIT_WALLPAPER_STATUS_FILE=%h/.cache/orbit-wallpaper-engine/status
+Environment=ORBIT_WALLPAPER_EVENTS_FILE=%h/.cache/orbit-wallpaper-engine/events
 
 Restart=on-failure
 RestartSec=2
+RestartPreventExitStatus=78
+TimeoutStartSec=70s
 TimeoutStopSec=5
 FinalKillSignal=SIGKILL
+ExecStopPost=/usr/bin/rm -f %h/.cache/orbit-wallpaper-engine/status
 
 [Install]
 WantedBy=hyprland-session.target
