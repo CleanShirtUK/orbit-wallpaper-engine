@@ -1,0 +1,13 @@
+id = "local/orbit-wallpaper-engine"
+name = "Wallpaper Engine"
+version = "0.1.0"
+plugin_api = 20
+author = "Orbit Wallpaper Engine"
+license = "GPL-3.0-or-later"
+tags = ["wallpaper", "shader", "renderer"]
+icon = "photo"
+description = "Control the Orbit Wallpaper Engine renderer without taking ownership of wallpaper rendering."
+
+[[widget]]
+id = "widget"
+entry = "widget.luau"

@@ -5,7 +5,7 @@ import QtQuick.Window
 Window {
     id: window
     width: 900
-    height: 620
+    height: 760
     visible: true
     title: "Orbit Wallpaper Engine"
     color: "#12131b"

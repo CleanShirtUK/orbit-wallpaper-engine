@@ -25,8 +25,14 @@ Item {
     })
     property var previewStyle: ({ corner_radius: 10 })
     readonly property int standaloneSmallCornerRadius: 8
-    property string helperPath: Quickshell.env("HOME") + "/.local/bin/orbit-wallpaper-helper"
+    property string controlPath: Quickshell.env("HOME") + "/.local/bin/orbit-wallpaper-control"
     property string wallpaperServiceStatus: "unknown"
+    property string wallpaperReadiness: "unknown"
+    property string wallpaperAnimation: "unknown"
+    property int wallpaperSurfaceCount: 0
+    property int wallpaperOutputCount: 0
+    property bool wallpaperRestartRequired: false
+    property string wallpaperLastError: ""
     property bool showModeTabs: false
 
     function textColor() { return themeData.colors.text || "#c0caf5" }
@@ -348,17 +354,49 @@ Item {
             standaloneRestartProcess.running = true
     }
 
+    function apiError(value, fallback) {
+        if (value && value.error) {
+            if (value.error.message)
+                return String(value.error.message)
+            return String(value.error)
+        }
+        return fallback
+    }
+
+    function applyRendererStatus(value) {
+        wallpaperServiceStatus = value.renderer && value.renderer.state
+            ? value.renderer.state : "unknown"
+        wallpaperReadiness = value.readiness || "unknown"
+        wallpaperAnimation = value.animation || "unknown"
+        wallpaperSurfaceCount = value.outputs
+            && value.outputs.active_surfaces !== null
+            && value.outputs.active_surfaces !== undefined
+            ? Number(value.outputs.active_surfaces) : 0
+        wallpaperOutputCount = value.outputs
+            && value.outputs.count !== null
+            && value.outputs.count !== undefined
+            ? Number(value.outputs.count) : 0
+        wallpaperRestartRequired = value.configuration
+            ? Boolean(value.configuration.restart_required) : false
+        wallpaperLastError = value.last_error && value.last_error.message
+            ? String(value.last_error.message) : ""
+    }
+
     Process {
         id: standaloneStatusProcess
-        command: [root.helperPath, "renderer-status"]
+        command: [root.controlPath, "status", "--json"]
         running: false
         stdout: StdioCollector {
             onStreamFinished: {
                 try {
                     var value = JSON.parse(text)
-                    root.wallpaperServiceStatus = value.status || "unknown"
+                    if (value.ok === false)
+                        throw new Error(root.apiError(value, "Could not read renderer status"))
+                    root.applyRendererStatus(value)
                 } catch (error) {
                     root.wallpaperServiceStatus = "unknown"
+                    root.wallpaperReadiness = "unknown"
+                    root.wallpaperLastError = error.message
                 }
             }
         }
@@ -366,15 +404,21 @@ Item {
 
     Process {
         id: standaloneRestartProcess
-        command: [root.helperPath, "renderer-restart"]
+        command: [root.controlPath, "restart"]
         running: false
         stdout: StdioCollector {
             onStreamFinished: {
                 try {
                     var value = JSON.parse(text)
-                    root.wallpaperServiceStatus =
-                        value.status || root.wallpaperServiceStatus
-                } catch (error) {}
+                    if (value.ok === false)
+                        throw new Error(root.apiError(value, "Renderer restart failed"))
+                    if (value.status)
+                        root.applyRendererStatus(value.status)
+                    wallpaperRoot.wallpaperStatusText = "Renderer restarted."
+                } catch (error) {
+                    wallpaperRoot.wallpaperStatusText = error.message
+                    root.wallpaperLastError = error.message
+                }
             }
         }
         onExited: root.refreshRendererStatus()
@@ -386,8 +430,6 @@ Item {
     id: wallpaperRoot
     anchors.fill: parent
 
-        property string configPath: Quickshell.env("HOME") + "/.config/orbit-wallpaper-engine/config"
-        property string shaderDirectory: Quickshell.env("HOME") + "/.config/orbit-wallpaper-engine/shaders"
         property var shaderFiles: ["wave.frag (default)"]
         property string selectedShader: ""
         property real introDuration: 4.5
@@ -429,36 +471,36 @@ Item {
         property bool wallpaperDirty: false
         property string wallpaperStatusText: ""
         property bool shaderBrowserVisible: false
-        property bool shaderCatalogLoading: false
+    property bool shaderCatalogLoading: false
         property string shaderCatalogError: ""
         property var shaderCatalog: []
         property var selectedCatalogShader: null
+        property real shaderCatalogScrollY: 0
+    property bool stageSucceeded: false
+    property bool applySucceeded: false
 
         function parseConfig(text) {
-            var values = ({})
-            var lines = String(text).split("\n")
-            for (var i = 0; i < lines.length; ++i) {
-                var line = lines[i].trim()
-                if (!line || line[0] === "#")
-                    continue
-                var separator = line.indexOf("=")
-                if (separator < 1)
-                    continue
-                values[line.substring(0, separator).trim()] = line.substring(separator + 1).trim()
+            var payload = JSON.parse(String(text))
+            if (payload.ok === false)
+                throw new Error(root.apiError(payload, "Could not load wallpaper settings"))
+            var settings = payload.settings || ({})
+
+            function value(key, fallback) {
+                var item = settings[key]
+                return item && item.value !== null && item.value !== undefined
+                    ? item.value : fallback
             }
 
             function numberValue(key, fallback) {
-                var value = Number(values[key])
-                return isFinite(value) ? value : fallback
+                var parsed = Number(value(key, fallback))
+                return isFinite(parsed) ? parsed : fallback
             }
 
             function boolValue(key, fallback) {
-                if (values[key] === undefined)
-                    return fallback
-                var value = String(values[key]).trim().toLowerCase()
-                if (["1", "true", "yes", "on"].indexOf(value) >= 0)
+                var parsed = String(value(key, "")).trim().toLowerCase()
+                if (["1", "true", "yes", "on"].indexOf(parsed) >= 0)
                     return true
-                if (["0", "false", "no", "off"].indexOf(value) >= 0)
+                if (["0", "false", "no", "off"].indexOf(parsed) >= 0)
                     return false
                 return fallback
             }
@@ -478,17 +520,21 @@ Item {
             resourceGovernor = boolValue("ORBIT_WALLPAPER_RESOURCE_GOVERNOR", true)
             gpuPressureEnter = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", 75.0)
             gpuPressureExit = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", 45.0)
-            selectedShader = values["ORBIT_WALLPAPER_SHADER"] || ""
-            wallpaperDirty = false
+            selectedShader = value("ORBIT_WALLPAPER_SHADER", "")
+            wallpaperRestartRequired = Boolean(payload.restart_required)
+            wallpaperDirty = wallpaperRestartRequired
             configLoaded = true
         }
 
         function parseShaders(text) {
+            var payload = JSON.parse(String(text))
+            if (payload.ok === false)
+                throw new Error(root.apiError(payload, "Could not list installed shaders"))
             var files = ["wave.frag (default)"]
-            var lines = String(text).split("\n")
-            for (var i = 0; i < lines.length; ++i) {
-                var file = lines[i].trim()
-                if (file && files.indexOf(file) < 0)
+            var installed = payload.shaders || []
+            for (var i = 0; i < installed.length; ++i) {
+                var file = String(installed[i])
+                if (file && file !== "wave.frag" && files.indexOf(file) < 0)
                     files.push(file)
             }
             shaderFiles = files
@@ -526,14 +572,28 @@ Item {
             return output
         }
 
+        function syncCatalogSelection(items) {
+            if (!selectedCatalogShader)
+                return
+            for (var i = 0; i < items.length; ++i) {
+                if (items[i].id === selectedCatalogShader.id) {
+                    selectedCatalogShader = items[i]
+                    return
+                }
+            }
+            selectedCatalogShader = null
+        }
+
         function openShaderBrowser() {
             shaderBrowserVisible = true
             shaderCatalogError = ""
             if (!shaderCatalog.length && !shaderCatalogProcess.running) {
                 shaderCatalogLoading = true
                 shaderCatalogProcess.command = [
-                    root.helperPath,
-                    "shader-catalog"
+                    root.controlPath,
+                    "shader",
+                    "catalogue",
+                    "--json"
                 ]
                 shaderCatalogProcess.running = true
             }
@@ -542,12 +602,16 @@ Item {
         function refreshShaderCatalog() {
             if (shaderCatalogProcess.running)
                 return
+            shaderCatalogScrollY = shaderCatalogList.contentY
             shaderCatalogLoading = true
             shaderCatalogError = ""
+            shaderCatalogList.contentY = 0
             shaderCatalogProcess.command = [
-                root.helperPath,
-                "shader-catalog",
-                "--refresh"
+                root.controlPath,
+                "shader",
+                "catalogue",
+                "--refresh",
+                "--json"
             ]
             shaderCatalogProcess.running = true
         }
@@ -555,13 +619,15 @@ Item {
         function installCatalogShader(item) {
             if (!item || shaderInstallProcess.running)
                 return
+            shaderCatalogScrollY = shaderCatalogList.contentY
             selectedCatalogShader = item
             shaderCatalogError = ""
             shaderInstallProcess.command = [
-                root.helperPath,
-                "shader-install",
-                String(item.id),
-                "--apply"
+                root.controlPath,
+                    "shader",
+                    "apply",
+                    String(item.id),
+                    "--intro"
             ]
             shaderInstallProcess.running = true
         }
@@ -583,58 +649,28 @@ Item {
             if (saveWallpaperConfig.running)
                 return
 
+            wallpaperRoot.stageSucceeded = false
             wallpaperStatusText = "Saving…"
 
-            var values = [
-                "ORBIT_WALLPAPER_INTRO_DURATION=" + Number(introDuration).toFixed(3),
-                "ORBIT_WALLPAPER_EXIT_DURATION=" + Number(exitDuration).toFixed(3),
-                "ORBIT_WALLPAPER_INTRO_PEAK_SPEED=" + Number(introPeakSpeed).toFixed(3),
-                "ORBIT_WALLPAPER_INTRO_PEAK_START=" + Number(introPeakStart).toFixed(3),
-                "ORBIT_WALLPAPER_INTRO_PEAK_END=" + Number(introPeakEnd).toFixed(3),
-                "ORBIT_WALLPAPER_INTRO_REVEAL_END=" + Number(introRevealEnd).toFixed(3),
-                "ORBIT_WALLPAPER_INTRO_DECAY=" + Number(introDecay).toFixed(3),
-                "ORBIT_WALLPAPER_PALETTE_STRENGTH=" + Number(paletteStrength).toFixed(3),
-                "ORBIT_WALLPAPER_PEAK_BRIGHTNESS=" + Number(peakBrightness).toFixed(3),
-                "ORBIT_WALLPAPER_TARGET_FPS=" + Number(targetFps).toFixed(1),
-                "ORBIT_WALLPAPER_RENDER_SCALE=" + Number(renderScale).toFixed(2),
-                "ORBIT_WALLPAPER_SPEED=" + Number(shaderSpeed).toFixed(2),
-                "ORBIT_WALLPAPER_RESOURCE_GOVERNOR=" + (resourceGovernor ? "1" : "0"),
-                "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER=" + Number(gpuPressureEnter).toFixed(0),
-                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT=" + Number(gpuPressureExit).toFixed(0)
-            ]
-
-            if (selectedShader)
-                values.push("ORBIT_WALLPAPER_SHADER=" + selectedShader)
-
             saveWallpaperConfig.command = [
-                "/usr/bin/python3",
-                "-c",
-                "import os,sys,tempfile\n"
-                + "path=sys.argv[1]\n"
-                + "updates=dict(x.split('=',1) for x in sys.argv[2:])\n"
-                + "managed=set(updates)|{'ORBIT_WALLPAPER_SHADER'}\n"
-                + "try:\n"
-                + "    old=open(path,encoding='utf-8').read().splitlines()\n"
-                + "except FileNotFoundError:\n"
-                + "    old=[]\n"
-                + "out=[]; seen=set()\n"
-                + "for line in old:\n"
-                + "    raw=line.strip()\n"
-                + "    key=raw.split('=',1)[0] if '=' in raw and not raw.startswith('#') else None\n"
-                + "    if key in managed:\n"
-                + "        if key in updates and key not in seen:\n"
-                + "            out.append(key+'='+updates[key]); seen.add(key)\n"
-                + "        continue\n"
-                + "    out.append(line)\n"
-                + "for key,value in updates.items():\n"
-                + "    if key not in seen: out.append(key+'='+value)\n"
-                + "os.makedirs(os.path.dirname(path),exist_ok=True)\n"
-                + "fd,tmp=tempfile.mkstemp(prefix='.config.',dir=os.path.dirname(path),text=True)\n"
-                + "with os.fdopen(fd,'w',encoding='utf-8') as f:\n"
-                + "    f.write('\\n'.join(out).rstrip()+'\\n')\n"
-                + "os.replace(tmp,path)\n",
-                configPath
-            ].concat(values)
+                root.controlPath, "config", "set",
+                "ORBIT_WALLPAPER_INTRO_DURATION", Number(introDuration).toFixed(3),
+                "ORBIT_WALLPAPER_EXIT_DURATION", Number(exitDuration).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_SPEED", Number(introPeakSpeed).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_START", Number(introPeakStart).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_PEAK_END", Number(introPeakEnd).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_REVEAL_END", Number(introRevealEnd).toFixed(3),
+                "ORBIT_WALLPAPER_INTRO_DECAY", Number(introDecay).toFixed(3),
+                "ORBIT_WALLPAPER_PALETTE_STRENGTH", Number(paletteStrength).toFixed(3),
+                "ORBIT_WALLPAPER_PEAK_BRIGHTNESS", Number(peakBrightness).toFixed(3),
+                "ORBIT_WALLPAPER_TARGET_FPS", Number(targetFps).toFixed(1),
+                "ORBIT_WALLPAPER_RENDER_SCALE", Number(renderScale).toFixed(2),
+                "ORBIT_WALLPAPER_SPEED", Number(shaderSpeed).toFixed(2),
+                "ORBIT_WALLPAPER_RESOURCE_GOVERNOR", resourceGovernor ? "1" : "0",
+                "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", Number(gpuPressureEnter).toFixed(0),
+                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", Number(gpuPressureExit).toFixed(0),
+                "ORBIT_WALLPAPER_SHADER", selectedShader || "wave.frag"
+            ]
 
             saveWallpaperConfig.running = true
         }
@@ -650,19 +686,16 @@ Item {
                     try {
                         var value = JSON.parse(text)
                         if (value.ok === false)
-                            throw new Error(value.error || "Could not load shader catalogue")
+                            throw new Error(root.apiError(value, "Could not load shader catalogue"))
                         wallpaperRoot.shaderCatalog = value.shaders || []
                         wallpaperRoot.shaderCatalogError = ""
-                        if (wallpaperRoot.selectedCatalogShader) {
-                            var selectedId = wallpaperRoot.selectedCatalogShader.id
-                            wallpaperRoot.selectedCatalogShader = null
-                            for (var i = 0; i < wallpaperRoot.shaderCatalog.length; ++i) {
-                                if (wallpaperRoot.shaderCatalog[i].id === selectedId) {
-                                    wallpaperRoot.selectedCatalogShader = wallpaperRoot.shaderCatalog[i]
-                                    break
-                                }
-                            }
-                        }
+                        wallpaperRoot.syncCatalogSelection(wallpaperRoot.shaderCatalog)
+                        Qt.callLater(function() {
+                            shaderCatalogList.contentY = Math.min(
+                                wallpaperRoot.shaderCatalogScrollY,
+                                Math.max(0, shaderCatalogList.contentHeight - shaderCatalogList.height)
+                            )
+                        })
                     } catch (error) {
                         wallpaperRoot.shaderCatalogError = error.message
                     }
@@ -683,9 +716,11 @@ Item {
                     try {
                         var value = JSON.parse(text)
                         if (value.ok === false)
-                            throw new Error(value.error || "Shader installation failed")
+                            throw new Error(root.apiError(value, "Shader apply failed"))
                         wallpaperRoot.wallpaperStatusText =
-                            value.applied ? "Installed and applied " + value.name + "." : "Installed " + value.name + "."
+                            value.applied
+                                ? "Installed and applied " + (value.shader && value.shader.name || "shader") + "."
+                                : "Installed " + (value.name || "shader") + "."
                         wallpaperRoot.shaderCatalogError = ""
                         wallpaperRoot.reloadConfig()
                         wallpaperRoot.refreshShaderCatalog()
@@ -695,77 +730,141 @@ Item {
                 }
             }
             onExited: function(exitCode) {
-                if (exitCode !== 0 && !wallpaperRoot.shaderCatalogError)
-                    wallpaperRoot.shaderCatalogError = "Shader installation failed."
+                if (exitCode !== 0) {
+                    if (!wallpaperRoot.shaderCatalogError)
+                        wallpaperRoot.shaderCatalogError = "Shader installation failed."
+                    wallpaperRoot.reloadConfig()
+                    wallpaperRoot.refreshShaderCatalog()
+                }
             }
         }
 
         Process {
             id: loadWallpaperConfig
-            command: ["/usr/bin/sh", "-c", "cat \"$1\" 2>/dev/null || true", "sh", wallpaperRoot.configPath]
+            command: [root.controlPath, "config", "get", "--json"]
             running: false
             stdout: StdioCollector {
                 onStreamFinished: {
-                    wallpaperRoot.parseConfig(text)
-                    wallpaperRoot.wallpaperStatusText = ""
+                    try {
+                        wallpaperRoot.parseConfig(text)
+                        wallpaperRoot.wallpaperStatusText = ""
+                    } catch (error) {
+                        wallpaperRoot.wallpaperStatusText = error.message
+                        wallpaperRoot.wallpaperLastError = error.message
+                    }
                 }
             }
         }
 
         Process {
             id: listWallpaperShaders
-            command: ["/usr/bin/sh", "-c",
-                "d=\"$1\"; [ -d \"$d\" ] || exit 0; "
-                + "find \"$d\" -maxdepth 1 -type f -name '*.frag' -printf '%f\\n' | sort",
-                "sh", wallpaperRoot.shaderDirectory]
+            command: [root.controlPath, "shader", "list-installed", "--json"]
             running: false
             stdout: StdioCollector {
-                onStreamFinished: wallpaperRoot.parseShaders(text)
+                onStreamFinished: {
+                    try {
+                        wallpaperRoot.parseShaders(text)
+                    } catch (error) {
+                        wallpaperRoot.wallpaperStatusText = error.message
+                        wallpaperRoot.wallpaperLastError = error.message
+                    }
+                }
             }
         }
 
         Process {
             id: saveWallpaperConfig
             running: false
-            stdout: StdioCollector {}
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        var value = JSON.parse(text)
+                        if (value.ok === false)
+                            throw new Error(root.apiError(value, "Could not stage wallpaper settings"))
+                        wallpaperRoot.stageSucceeded = true
+                    } catch (error) {
+                        wallpaperRoot.wallpaperStatusText = error.message
+                        wallpaperRoot.wallpaperLastError = error.message
+                    }
+                }
+            }
             onExited: function(exitCode) {
-                if (exitCode !== 0) {
+                if (exitCode !== 0 || !wallpaperRoot.stageSucceeded) {
                     wallpaperRoot.wallpaperStatusText = "Could not save wallpaper settings."
                     return
                 }
-                wallpaperRoot.wallpaperDirty = false
-                wallpaperRoot.wallpaperStatusText = "Restarting renderer…"
+                wallpaperRoot.wallpaperStatusText = "Applying wallpaper settings…"
+                wallpaperRoot.applySucceeded = false
                 applyWallpaperProcess.running = true
             }
         }
 
         Process {
             id: applyWallpaperProcess
-            command: ["/usr/bin/sh", "-c",
-                "systemctl --user restart orbit-wallpaper-engine.service"
-                + " && sleep 0.15"
-                + " && systemctl --user reload orbit-wallpaper-engine.service"]
+            command: [root.controlPath, "config", "apply"]
             running: false
-            stdout: StdioCollector {}
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        var value = JSON.parse(text)
+                        if (value.ok === false)
+                            throw new Error(root.apiError(value, "Wallpaper settings could not be applied"))
+                        wallpaperRoot.applySucceeded = true
+                    } catch (error) {
+                        wallpaperRoot.applySucceeded = false
+                        wallpaperRoot.wallpaperStatusText = error.message
+                        wallpaperRoot.wallpaperLastError = error.message
+                    }
+                }
+            }
             onExited: function(exitCode) {
-                wallpaperRoot.wallpaperStatusText = exitCode === 0
-                    ? "Wallpaper settings applied."
-                    : "Wallpaper renderer restart failed."
+                if (exitCode !== 0 || !wallpaperRoot.applySucceeded) {
+                    if (!wallpaperRoot.wallpaperStatusText)
+                        wallpaperRoot.wallpaperStatusText = "Wallpaper settings could not be applied."
+                    wallpaperRoot.reloadConfig()
+                    root.refreshRendererStatus()
+                    return
+                }
+                wallpaperRoot.wallpaperDirty = false
+                wallpaperRoot.wallpaperRestartRequired = false
+                wallpaperRoot.wallpaperStatusText = "Wallpaper settings applied with intro."
                 wallpaperRoot.reloadConfig()
+                root.refreshRendererStatus()
             }
         }
 
         Process {
             id: replayIntroProcess
-            command: ["/usr/bin/systemctl", "--user", "reload", "orbit-wallpaper-engine.service"]
+            command: [root.controlPath, "intro"]
             running: false
-            stdout: StdioCollector {}
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    try {
+                        var value = JSON.parse(text)
+                        if (value.ok === false)
+                            throw new Error(root.apiError(value, "Could not replay intro"))
+                    } catch (error) {
+                        wallpaperRoot.wallpaperStatusText = error.message
+                    }
+                }
+            }
             onExited: function(exitCode) {
                 wallpaperRoot.wallpaperStatusText = exitCode === 0
                     ? "Intro replayed."
                     : "Could not replay intro."
+                root.refreshRendererStatus()
             }
         }
+
+        Flickable {
+            id: settingsScroller
+            anchors.fill: parent
+            clip: true
+            contentWidth: width
+            contentHeight: wallpaperColumn.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+
+            FastWheelHandler { scroller: settingsScroller }
 
         Column {
             id: wallpaperColumn
@@ -1250,15 +1349,16 @@ Item {
             // in the Settings shell, so don't repeat them here.
             Item {
                 width: parent.width
-                height: 58
+                height: statusColumn.implicitHeight
 
-                Row {
+                Column {
+                    id: statusColumn
                     anchors.fill: parent
                     spacing: 10
 
                     Column {
-                        width: 210
-                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        height: 30
                         spacing: 3
 
                         Text {
@@ -1271,67 +1371,65 @@ Item {
 
                         Text {
                             text: (wallpaperRoot.selectedShader || "wave.frag")
-                                + "  •  "
-                                + root.wallpaperServiceStatus
+                                + "  •  " + root.wallpaperServiceStatus
+                                + "  •  " + root.wallpaperReadiness
+                                + "  •  " + root.wallpaperSurfaceCount
+                                + "/" + root.wallpaperOutputCount + " surfaces"
+                                + (root.wallpaperRestartRequired ? "  •  restart required" : "")
                                 + (wallpaperRoot.wallpaperStatusText
                                     ? "  •  " + wallpaperRoot.wallpaperStatusText
-                                    : "")
+                                    : root.wallpaperLastError ? "  •  " + root.wallpaperLastError : "")
                             color: root.wallpaperServiceStatus === "active"
                                 ? (themeData.colors.success || "#9ece6a")
                                 : mutedColor()
                             font.family: "JetBrains Mono"
                             font.pixelSize: 9
                             elide: Text.ElideRight
+                            maximumLineCount: 1
                             width: parent.width
                         }
                     }
 
-                    Item {
-                        width: Math.max(1, parent.width
-                            - 210
-                            - replayIntroButton.implicitWidth
-                            - applyWallpaperButton.implicitWidth
-                            - restartServiceButton.implicitWidth
-                            - 40)
-                        height: 1
-                    }
+                    Flow {
+                        width: parent.width
+                        spacing: 10
 
-                    WallpaperButton {
-                        id: replayIntroButton
-                        themeData: root.themeData
-                        compact: true
-                        text: "Replay intro"
-                        enabled: root.wallpaperServiceStatus === "active"
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: wallpaperRoot.replayIntro()
-                    }
+                        WallpaperButton {
+                            id: replayIntroButton
+                            themeData: root.themeData
+                            compact: true
+                            text: "Replay intro"
+                            enabled: root.wallpaperServiceStatus === "active"
+                                && root.wallpaperReadiness === "ready"
+                            onClicked: wallpaperRoot.replayIntro()
+                        }
 
-                    WallpaperButton {
-                        id: applyWallpaperButton
-                        themeData: root.themeData
-                        compact: true
-                        highlighted: true
-                        text: "Apply"
-                        enabled: wallpaperRoot.wallpaperDirty
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: wallpaperRoot.saveConfig()
-                    }
+                        WallpaperButton {
+                            id: applyWallpaperButton
+                            themeData: root.themeData
+                            compact: true
+                            highlighted: true
+                            text: "Apply"
+                            enabled: wallpaperRoot.wallpaperDirty
+                            onClicked: wallpaperRoot.saveConfig()
+                        }
 
-                    WallpaperButton {
-                        id: restartServiceButton
-                        themeData: root.themeData
-                        compact: true
-                        text: root.wallpaperServiceStatus === "active"
-                            ? "Restart Renderer"
-                            : "Start Renderer"
-                        highlighted: root.wallpaperServiceStatus !== "active"
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: root.restartRenderer()
+                        WallpaperButton {
+                            id: restartServiceButton
+                            themeData: root.themeData
+                            compact: true
+                            text: root.wallpaperServiceStatus === "active"
+                                ? "Restart Renderer"
+                                : "Start Renderer"
+                            highlighted: root.wallpaperServiceStatus !== "active"
+                            onClicked: root.restartRenderer()
+                        }
                     }
 
                 }
             }
     }
+        }
 
         Rectangle {
             id: shaderBrowserOverlay
@@ -1421,6 +1519,7 @@ Item {
                             height: 34
                             radius: width / 2
                             enabled: !wallpaperRoot.shaderCatalogLoading
+                                && !shaderInstallProcess.running
                             opacity: enabled ? 1.0 : 0.45
                             color: refreshCatalogMouse.containsMouse
                                 ? Qt.alpha(accentColor(), 0.36)
@@ -1457,6 +1556,13 @@ Item {
                         id: shaderSearch
                         width: parent.width
                         placeholderText: "Search shaders, authors, categories or licences…"
+                        onTextChanged: {
+                            shaderCatalogList.contentY = 0
+                            wallpaperRoot.shaderCatalogScrollY = 0
+                            wallpaperRoot.syncCatalogSelection(
+                                wallpaperRoot.filteredCatalog(text)
+                            )
+                        }
                     }
 
                     Row {
@@ -1472,7 +1578,7 @@ Item {
 
                             ListView {
                                 id: shaderCatalogList
-                                FastWheelHandler { scroller: shaderCatalogList }
+                                    FastWheelHandler { scroller: shaderCatalogList }
                                 anchors.fill: parent
                                 anchors.margins: 5
                                 clip: true
@@ -1481,7 +1587,7 @@ Item {
 
                                 delegate: Rectangle {
                                     required property var modelData
-                                    width: shaderCatalogList.width
+                                    width: shaderCatalogList.width - 10
                                     height: 54
                                     radius: 6
                                     color: wallpaperRoot.selectedCatalogShader
@@ -1526,6 +1632,7 @@ Item {
 
                                     MouseArea {
                                         anchors.fill: parent
+                                        enabled: !shaderInstallProcess.running
                                         onClicked: wallpaperRoot.selectedCatalogShader = modelData
                                     }
                                 }
