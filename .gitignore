@@ -12,3 +12,7 @@ __pycache__/
 *.bak
 *.orig
 *.rej
+
+# Local acceptance backups and snapshots
+/phase*-backups/
+*.pre-cycle-fix

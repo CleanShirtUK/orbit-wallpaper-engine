@@ -49,6 +49,8 @@ bash -n tools/orbit-wallpaper-settings
 bash -n examples/generic/signal-wallpaper
 bash -n examples/hyprland/wallpaper-animation
 bash -n examples/hyprland/animate-shutdown
+bash -n examples/hyprland/animate-lock
+bash -n examples/hyprland/animate-login
 bash -n tools/test-integrations.sh
 
 say "Checking Python syntax"

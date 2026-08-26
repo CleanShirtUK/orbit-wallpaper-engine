@@ -3,7 +3,7 @@
 ## Source
 
 - [ ] Working tree is clean.
-- [ ] `VERSION` contains the intended version.
+- [ ] `VERSION` contains `0.1.2`.
 - [ ] `CHANGELOG.md` contains the release entry.
 - [ ] No build artifacts are tracked.
 - [ ] No user-specific paths are present in shipped runtime files.
@@ -16,7 +16,7 @@
 - [ ] `make` succeeds.
 - [ ] Renderer starts and remains active.
 - [ ] Standalone settings UI opens.
-- [ ] Orbit embedded settings UI still opens when tested with Orbit.
+- [ ] Noctalia launcher opens the canonical Settings UI.
 - [ ] Intro replay works.
 - [ ] Renderer restart works.
 - [ ] Palette integration works when explicitly configured.
@@ -26,6 +26,10 @@
 - [ ] A compatible shader can be installed and applied.
 - [ ] A broken shader rolls back safely.
 - [ ] A blacklisted shader is absent from the normal catalogue and cannot be installed directly.
+- [ ] Login waits for readiness, then replays intro.
+- [ ] Lock sends bounded exit and unlock replays intro.
+- [ ] Monitor disable/re-enable and repeated output lifecycle changes preserve the renderer.
+- [ ] Restart-required Apply shows exit then intro and recovers from failure.
 
 ## Policy and documentation
 
@@ -42,6 +46,6 @@
 - [ ] Repository description is set.
 - [ ] Topics are set.
 - [ ] Default branch is correct.
-- [ ] Release tag matches `v0.1.0`.
+- [ ] Release tag matches `v0.1.2`.
 - [ ] Release notes match the changelog.
 - [ ] Public repository tree matches the reviewed local tree.
