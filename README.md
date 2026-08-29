@@ -1,6 +1,6 @@
 # Orbit Wallpaper Engine
 
-**Release status:** v0.1.2 release candidate. Interfaces may still change before 1.0.
+**Release status:** v0.2.0 release candidate. Interfaces may still change before 1.0.
 
 A lightweight Wayland shader wallpaper renderer with a canonical optional settings GUI, cross-monitor rendering, animated desktop transitions, palette mapping, performance controls, and an optional shader browser.
 
@@ -8,15 +8,14 @@ Orbit Wallpaper Engine is designed to run independently of any desktop shell.
 
 ## Version roadmap
 
-### v0.1.2 — Polish & Release Hardening
+### v0.2.0 — Multi-monitor Rendering & Reliability
 
-Current milestone. This release restores and verifies session lifecycle behavior,
-polishes the canonical standalone Settings application, makes restart-required
-Apply transitions visually intentional, fixes output lifecycle issues, finishes
-remaining non-architectural UX work, cleans up abandoned Noctalia frontend work,
-completes regression testing, and prepares the v0.1.2 release.
+Current milestone. This release adds renderer-owned virtual desktop geometry,
+continuous ShaderToy-style rendering across outputs, the global
+**Scale between multiple monitors** setting, palette-loading fixes, and EGL
+surface reconciliation improvements.
 
-### v0.2.0 — True Live Apply
+### v0.3.0 — True Live Apply
 
 Reserved specifically for true runtime configuration updates. Every exposed
 renderer parameter must update while the renderer remains running, without a
@@ -25,7 +24,7 @@ restart, exit animation, intro animation, or ultimately an Apply button.
 Intended architecture: setting changes -> new value sent to the running renderer
 -> renderer reflects it immediately.
 
-### v0.3.0 — Expanded Shader Capabilities
+### v0.4.0 — Expanded Shader Capabilities
 
 Planned work includes audio/audio-reactive shaders, an audit of useful catalogue
 inputs, additional shader capabilities, and expanded compatibility detection.

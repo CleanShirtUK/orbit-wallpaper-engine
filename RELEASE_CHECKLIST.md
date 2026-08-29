@@ -3,7 +3,7 @@
 ## Source
 
 - [ ] Working tree is clean.
-- [ ] `VERSION` contains `0.1.2`.
+- [ ] `VERSION` contains `0.2.0`.
 - [ ] `CHANGELOG.md` contains the release entry.
 - [ ] No build artifacts are tracked.
 - [ ] No user-specific paths are present in shipped runtime files.
@@ -46,6 +46,6 @@
 - [ ] Repository description is set.
 - [ ] Topics are set.
 - [ ] Default branch is correct.
-- [ ] Release tag matches `v0.1.2`.
+- [ ] Release tag matches `v0.2.0`.
 - [ ] Release notes match the changelog.
 - [ ] Public repository tree matches the reviewed local tree.

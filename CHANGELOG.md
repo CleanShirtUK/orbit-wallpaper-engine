@@ -4,6 +4,51 @@ All notable changes to Orbit Wallpaper Engine will be documented here.
 
 The project follows semantic versioning where practical.
 
+## [0.2.0] - 2026-08-29
+
+v0.2.0 adds renderer-owned multi-monitor scaling and reliability improvements
+while retaining restart-required configuration Apply semantics.
+
+### Added
+
+- Global **Scale between multiple monitors** setting, configurable through the
+  canonical settings UI and `ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS`.
+- Renderer-owned virtual desktop geometry with standard Orbit shader uniforms for
+  local resolution, virtual resolution, output origin, and scaling state.
+- Continuous ShaderToy-style `mainImage` rendering across enabled outputs, with
+  correct negative and offset monitor-coordinate handling.
+- Documentation and compatibility guidance for the Orbit shader geometry
+  contract.
+
+### Improved
+
+- ShaderToy-style `mainImage` shaders are automatically adapted to virtual
+  `fragCoord` and `iResolution` values when multi-monitor scaling is enabled.
+- `wave.frag` now follows the global scaling toggle while retaining its explicit
+  `u_resolution`, `u_origin`, and `u_canvas` contract.
+- Disabled outputs no longer contribute to virtual canvas geometry.
+- Existing shaders retain independent local/per-output behavior when scaling is
+  disabled.
+
+### Fixed
+
+- Palette loading now supports both supported Noctalia-generated Lua palette
+  formats and reports parsed values predictably.
+- The service palette path is portable for the current Noctalia-generated theme
+  location. The related Noctalia hook cleanup is maintained outside this
+  repository.
+- EGL context restoration during output/surface reconciliation prevents surface
+  lifecycle failures during topology changes.
+- Failed shader/configuration Apply transitions recover through the existing
+  rollback path instead of leaving stale or unusable renderer state.
+
+### Compatibility
+
+- Most ShaderToy-style `mainImage` shaders participate automatically.
+- Shaders with fixed logical resolutions, raw `gl_FragCoord` usage, unusual
+  framebuffer assumptions, or shader-specific pixel-space logic may require
+  individual adaptation. Existing shader bodies are not rewritten automatically.
+
 ## [0.1.2] - 2026-08-26
 
 v0.1.2 is the Polish & Release Hardening milestone. It does not provide true
