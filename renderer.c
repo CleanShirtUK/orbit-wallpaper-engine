@@ -303,6 +303,34 @@ static struct color environment_color_compat(const char *name, const char *legac
     return hex_color(value && *value ? value : fallback);
 }
 
+static bool palette_color(const char *content, const char *name, struct color *color) {
+    const char *match = content;
+    const size_t name_length = strlen(name);
+    while ((match = strstr(match, name)) != NULL) {
+        const char before = match == content ? '\0' : match[-1];
+        const char after = match[name_length];
+        const bool before_is_identifier =
+            (before >= 'a' && before <= 'z') || (before >= 'A' && before <= 'Z') ||
+            (before >= '0' && before <= '9') || before == '_';
+        const bool after_is_identifier =
+            (after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z') ||
+            (after >= '0' && after <= '9') || after == '_';
+        if (!before_is_identifier && !after_is_identifier) {
+            const char *line_end = strchr(match, '\n');
+            const char *equals = strchr(match + name_length, '=');
+            if (equals && (!line_end || equals < line_end)) {
+                const char *quote = strchr(equals, '"');
+                if (quote && (!line_end || quote < line_end)) {
+                    *color = hex_color(quote + 1);
+                    return true;
+                }
+            }
+        }
+        match += name_length;
+    }
+    return false;
+}
+
 
 static struct color wallpaper_base_color(struct color surface) {
     float luminance = surface.r * 0.2126f + surface.g * 0.7152f + surface.b * 0.0722f;
@@ -397,9 +425,18 @@ static int read_animation_request(struct app *app) {
 }
 
 static bool read_palette(struct app *app) {
-    if (!app->follow_system_palette) return false;
+    if (!app->follow_system_palette) {
+        fprintf(stderr, "palette: following disabled; using configured fallback colours\n");
+        return false;
+    }
+    if (!app->palette_path[0]) {
+        fprintf(stderr, "palette: no palette file configured; using fallback colours\n");
+        return false;
+    }
     struct stat file_stat;
     if (stat(app->palette_path, &file_stat) != 0 || file_stat.st_mtime == app->palette_mtime) {
+        fprintf(stderr, "palette: %s is unavailable or unchanged; using current colours\n",
+                app->palette_path);
         return false;
     }
 
@@ -411,15 +448,20 @@ static bool read_palette(struct app *app) {
     content[length] = '\0';
 
     const char *names[] = {"primary", "secondary", "surface", "error"};
+    bool parsed[4] = {false};
     for (int i = 0; i < 4; i++) {
-        char needle[64];
-        snprintf(needle, sizeof(needle), "local %s", names[i]);
-        char *match = strstr(content, needle);
-        if (!match) continue;
-        char *quote = strchr(match, '"');
-        if (quote) app->target_colors[i] = hex_color(quote + 1);
+        parsed[i] = palette_color(content, names[i], &app->target_colors[i]);
     }
     app->palette_mtime = file_stat.st_mtime;
+    fprintf(stderr,
+            "palette: path=%s parsed=%s,%s,%s,%s values=%.3f,%.3f,%.3f / %.3f,%.3f,%.3f / %.3f,%.3f,%.3f / %.3f,%.3f,%.3f\n",
+            app->palette_path,
+            parsed[0] ? "yes" : "no", parsed[1] ? "yes" : "no",
+            parsed[2] ? "yes" : "no", parsed[3] ? "yes" : "no",
+            app->target_colors[0].r, app->target_colors[0].g, app->target_colors[0].b,
+            app->target_colors[1].r, app->target_colors[1].g, app->target_colors[1].b,
+            app->target_colors[2].r, app->target_colors[2].g, app->target_colors[2].b,
+            app->target_colors[3].r, app->target_colors[3].g, app->target_colors[3].b);
     write_background_color(app);
     app->snapshot_dirty = app->capture_snapshots;
     return true;
@@ -1172,6 +1214,14 @@ static void retire_removed_outputs(struct app *app) {
 }
 
 static bool create_output_surfaces(struct app *app) {
+    // Surface reconciliation can run after render() releases the EGL context.
+    // Make the compile surface current before touching framebuffer resources.
+    if (app->program && app->compile_surface != EGL_NO_SURFACE &&
+        !eglMakeCurrent(app->egl_display, app->compile_surface,
+                        app->compile_surface, app->egl_context)) {
+        fprintf(stderr, "could not make the EGL context current for surface reconciliation\n");
+        return false;
+    }
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
         if (!item->active) continue;

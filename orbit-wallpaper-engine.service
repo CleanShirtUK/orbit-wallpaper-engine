@@ -11,13 +11,15 @@ ExecStart=%h/.local/bin/orbit-wallpaper-engine
 # authoritative, timeout-bounded control API.
 ExecReload=%h/.local/bin/orbit-wallpaper-control intro
 
+# The EnvironmentFile may override this integration default with an explicit
+# user-selected palette source.
+Environment=ORBIT_WALLPAPER_PALETTE_FILE=%h/.config/hypr/noctalia.lua
 EnvironmentFile=-%h/.config/orbit-wallpaper-engine/config
 # The session integration sends the login/unlock intro after the compositor and
 # frontend are ready. A service restart remains hidden until an explicit intro.
 Environment=ORBIT_WALLPAPER_START_HIDDEN=1
 Environment=ORBIT_WALLPAPER_DISABLE_SNAPSHOTS=1
 Environment=ORBIT_WALLPAPER_FOLLOW_SYSTEM_PALETTE=1
-Environment=ORBIT_WALLPAPER_PALETTE_FILE=%h/.config/noctalia/wallpaper-palette.lua
 Environment=ORBIT_WALLPAPER_BACKGROUND_FILE=%h/.cache/orbit-wallpaper-engine/hyprlock-background.conf
 Environment=ORBIT_WALLPAPER_CONTROL_FILE=%h/.cache/orbit-wallpaper-engine/control
 Environment=ORBIT_WALLPAPER_STATUS_FILE=%h/.cache/orbit-wallpaper-engine/status
