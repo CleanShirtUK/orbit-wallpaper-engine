@@ -110,6 +110,10 @@ struct app {
     GLint primary, secondary, surface, error;
     GLint auto_palette_strength;
     GLint renderer_brightness;
+    GLint orbit_local_resolution;
+    GLint orbit_virtual_resolution;
+    GLint orbit_output_origin;
+    GLint orbit_scale_between_monitors;
     struct color colors[4];
     struct color target_colors[4];
     time_t palette_mtime;
@@ -122,6 +126,7 @@ struct app {
     float target_fps;
     float render_scale;
     float shader_speed;
+    bool scale_between_monitors;
     float gpu_pressure_enter;
     float gpu_pressure_exit;
     double pressure_since;
@@ -670,6 +675,11 @@ static char *prepare_fragment_shader(const char *source) {
     const char *i_frame_rate_decl = need_i_frame_rate ? "uniform float iFrameRate;\n" : "";
     const char *i_mouse_decl = need_i_mouse ? "uniform vec4 iMouse;\n" : "";
     const char *brightness_support = "uniform float u_orbit_renderer_brightness;\n";
+    const char *geometry_support =
+        "uniform vec2 u_orbit_local_resolution;\n"
+        "uniform vec2 u_orbit_virtual_resolution;\n"
+        "uniform vec2 u_orbit_output_origin;\n"
+        "uniform float u_orbit_scale_between_monitors;\n";
 
     // GLSL ES 1.00 lacks several functions commonly used by desktop/Shadertoy
     // shaders. Inject narrowly-scoped compatibility polyfills only when used.
@@ -730,7 +740,10 @@ static char *prepare_fragment_shader(const char *source) {
         wrapper =
             "\nvoid main() {\n"
             "    vec4 orbit_color = vec4(0.0);\n"
-            "    mainImage(orbit_color, gl_FragCoord.xy);\n"
+            "    vec2 orbit_frag_coord = mix(gl_FragCoord.xy,\n"
+            "        gl_FragCoord.xy + u_orbit_output_origin,\n"
+            "        u_orbit_scale_between_monitors);\n"
+            "    mainImage(orbit_color, orbit_frag_coord);\n"
             "    orbit_color.rgb = orbit_apply_palette(orbit_color.rgb);\n"
             "    orbit_color.rgb *= u_orbit_renderer_brightness;\n"
             "    gl_FragColor = orbit_color;\n"
@@ -739,7 +752,10 @@ static char *prepare_fragment_shader(const char *source) {
         wrapper =
             "\nvoid main() {\n"
             "    vec4 orbit_color = vec4(0.0);\n"
-            "    mainImage(orbit_color, gl_FragCoord.xy);\n"
+            "    vec2 orbit_frag_coord = mix(gl_FragCoord.xy,\n"
+            "        gl_FragCoord.xy + u_orbit_output_origin,\n"
+            "        u_orbit_scale_between_monitors);\n"
+            "    mainImage(orbit_color, orbit_frag_coord);\n"
             "    orbit_color.rgb *= u_orbit_renderer_brightness;\n"
             "    gl_FragColor = orbit_color;\n"
             "}\n";
@@ -749,17 +765,17 @@ static char *prepare_fragment_shader(const char *source) {
         strlen(i_time_decl) + strlen(i_resolution_decl) +
         strlen(i_time_delta_decl) + strlen(i_frame_decl) +
         strlen(i_frame_rate_decl) + strlen(i_mouse_decl) +
-        strlen(brightness_support) + strlen(math_compat) + strlen(palette_support) +
+        strlen(brightness_support) + strlen(geometry_support) + strlen(math_compat) + strlen(palette_support) +
         strlen(rename_main) + strlen(body) +
         strlen(restore_main) + strlen(wrapper) + 1;
     char *prepared = malloc(total);
     if (!prepared) return NULL;
 
-    snprintf(prepared, total, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+    snprintf(prepared, total, "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
              version_line, precision,
              i_time_decl, i_resolution_decl, i_time_delta_decl,
              i_frame_decl, i_frame_rate_decl, i_mouse_decl,
-             brightness_support, math_compat, palette_support, rename_main, body,
+             brightness_support, geometry_support, math_compat, palette_support, rename_main, body,
              restore_main, wrapper);
     return prepared;
 }
@@ -1273,7 +1289,7 @@ static bool create_output_surfaces(struct app *app) {
     size_t configured_count = 0;
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
-        if (!item->active) continue;
+        if (!item->active || !item->enabled) continue;
         if (!item->configured || !item->width || !item->height) {
             fprintf(stderr, "output %s is not configured yet (configured=%s, size=%dx%d)\n",
                     item->name[0] ? item->name : "(unnamed)",
@@ -1294,7 +1310,7 @@ static bool create_output_surfaces(struct app *app) {
 
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
-        if (!item->active) continue;
+        if (!item->active || !item->enabled) continue;
         if (!item->configured || !item->width || !item->height) continue;
         item->egl_window = wl_egl_window_create(item->surface, item->width, item->height);
         item->egl_surface = eglCreateWindowSurface(app->egl_display, app->egl_config,
@@ -1322,7 +1338,7 @@ static bool create_scaled_render_targets(struct app *app) {
 
     for (size_t i = 0; i < app->output_count; i++) {
         struct output *item = &app->outputs[i];
-        if (!item->active) continue;
+        if (!item->active || !item->enabled) continue;
         if (item->egl_surface == EGL_NO_SURFACE || item->render_fbo) continue;
 
         item->render_width = (int32_t)((float)item->width * app->render_scale + 0.5f);
@@ -1462,16 +1478,35 @@ static void render(struct app *app, float seconds, float brightness, float visib
         glUniform1f(app->brightness, 1.0f);
         glUniform1f(app->visibility, 1.0f);
 
-        glUniform2f(app->canvas,
-                    (float)(app->max_x - app->min_x) * coordinate_scale,
-                    (float)(app->max_y - app->min_y) * coordinate_scale);
+        // Keep local ShaderToy semantics tied to the actual render target,
+        // including render-scale rounding. Virtual geometry remains derived
+        // from the unrounded desktop layout in the same scaled coordinate space.
+        const float local_canvas_width = (float)render_width;
+        const float local_canvas_height = (float)render_height;
+        const float virtual_canvas_width = (float)(app->max_x - app->min_x) * coordinate_scale;
+        const float virtual_canvas_height = (float)(app->max_y - app->min_y) * coordinate_scale;
+        const float output_origin_x = (float)(item->x - app->min_x) * coordinate_scale;
+        const float output_origin_y = (float)(item->y - app->min_y) * coordinate_scale;
+        const float canvas_width = app->scale_between_monitors
+            ? virtual_canvas_width : local_canvas_width;
+        const float canvas_height = app->scale_between_monitors
+            ? virtual_canvas_height : local_canvas_height;
+        glUniform2f(app->canvas, canvas_width, canvas_height);
         glViewport(0, 0, render_width, render_height);
         glUniform2f(app->resolution, (float)render_width, (float)render_height);
         glUniform2f(app->resolution_alias, (float)render_width, (float)render_height);
-        glUniform3f(app->i_resolution, (float)render_width, (float)render_height, 1.0f);
+        glUniform3f(app->i_resolution,
+                    app->scale_between_monitors ? virtual_canvas_width : local_canvas_width,
+                    app->scale_between_monitors ? virtual_canvas_height : local_canvas_height,
+                    1.0f);
         glUniform2f(app->origin,
-                    (float)(item->x - app->min_x) * coordinate_scale,
-                    (float)(item->y - app->min_y) * coordinate_scale);
+                    app->scale_between_monitors ? output_origin_x : 0.0f,
+                    app->scale_between_monitors ? output_origin_y : 0.0f);
+        glUniform2f(app->orbit_local_resolution, local_canvas_width, local_canvas_height);
+        glUniform2f(app->orbit_virtual_resolution, virtual_canvas_width, virtual_canvas_height);
+        glUniform2f(app->orbit_output_origin, output_origin_x, output_origin_y);
+        glUniform1f(app->orbit_scale_between_monitors,
+                    app->scale_between_monitors ? 1.0f : 0.0f);
         set_vec3(app->primary, app->colors[0]);
         set_vec3(app->secondary, app->colors[1]);
         set_vec3(app->surface, app->colors[2]);
@@ -1561,6 +1596,9 @@ int main(int argc, char **argv) {
     app.target_fps = environment_float_compat("ORBIT_WALLPAPER_TARGET_FPS", "PS3_WAVE_TARGET_FPS", DEFAULT_TARGET_FPS, 1.0f, 240.0f);
     app.render_scale = environment_float_compat("ORBIT_WALLPAPER_RENDER_SCALE", "PS3_WAVE_RENDER_SCALE", DEFAULT_RENDER_SCALE, 0.25f, 1.0f);
     app.shader_speed = environment_float_compat("ORBIT_WALLPAPER_SPEED", "PS3_WAVE_SPEED", DEFAULT_SHADER_SPEED, 0.0f, 4.0f);
+    app.scale_between_monitors = environment_bool_compat(
+        "ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS",
+        "PS3_WAVE_SCALE_BETWEEN_MONITORS", true);
     app.resource_governor = environment_bool_compat("ORBIT_WALLPAPER_RESOURCE_GOVERNOR", "PS3_WAVE_RESOURCE_GOVERNOR", DEFAULT_RESOURCE_GOVERNOR);
     app.gpu_pressure_enter = environment_float_compat("ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", "PS3_WAVE_GPU_PRESSURE_ENTER", DEFAULT_GPU_PRESSURE_ENTER, 1.0f, 100.0f);
     app.gpu_pressure_exit = environment_float_compat("ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", "PS3_WAVE_GPU_PRESSURE_EXIT", DEFAULT_GPU_PRESSURE_EXIT, 0.0f, 100.0f);
@@ -1737,6 +1775,10 @@ int main(int argc, char **argv) {
     app.error = glGetUniformLocation(app.program, "u_error");
     app.auto_palette_strength = glGetUniformLocation(app.program, "u_orbit_palette_strength");
     app.renderer_brightness = glGetUniformLocation(app.program, "u_orbit_renderer_brightness");
+    app.orbit_local_resolution = glGetUniformLocation(app.program, "u_orbit_local_resolution");
+    app.orbit_virtual_resolution = glGetUniformLocation(app.program, "u_orbit_virtual_resolution");
+    app.orbit_output_origin = glGetUniformLocation(app.program, "u_orbit_output_origin");
+    app.orbit_scale_between_monitors = glGetUniformLocation(app.program, "u_orbit_scale_between_monitors");
     read_palette(&app);
     enum animation_mode animation;
     if (environment_bool_compat("ORBIT_WALLPAPER_START_HIDDEN", "PS3_WAVE_START_HIDDEN", false)) {

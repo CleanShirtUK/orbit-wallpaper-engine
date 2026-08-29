@@ -83,6 +83,7 @@ install-config:
 			'ORBIT_WALLPAPER_INTRO_REVEAL_END=0.22' \
 			'ORBIT_WALLPAPER_INTRO_DECAY=10.0' \
 			'ORBIT_WALLPAPER_PALETTE_STRENGTH=0.72' \
+			'ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS=1' \
 			'' \
 			'# Filename from ~/.config/orbit-wallpaper-engine/shaders/' \
 			'# ORBIT_WALLPAPER_SHADER=example.frag' \

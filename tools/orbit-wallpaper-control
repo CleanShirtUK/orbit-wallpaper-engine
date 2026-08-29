@@ -81,6 +81,7 @@ CONFIG_SPECS: dict[str, dict[str, object]] = {
     "ORBIT_WALLPAPER_TARGET_FPS": {"kind": "float", "minimum": 1.0, "maximum": 240.0, "classification": "RESTART_REQUIRED"},
     "ORBIT_WALLPAPER_RENDER_SCALE": {"kind": "float", "minimum": 0.25, "maximum": 1.0, "classification": "RESTART_REQUIRED"},
     "ORBIT_WALLPAPER_SPEED": {"kind": "float", "minimum": 0.0, "maximum": 4.0, "classification": "RESTART_REQUIRED"},
+    "ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS": {"kind": "bool", "classification": "RESTART_REQUIRED"},
     "ORBIT_WALLPAPER_RESOURCE_GOVERNOR": {"kind": "bool", "classification": "RESTART_REQUIRED"},
     "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER": {"kind": "float", "minimum": 1.0, "maximum": 100.0, "classification": "RESTART_REQUIRED"},
     "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT": {"kind": "float", "minimum": 0.0, "maximum": 100.0, "classification": "RESTART_REQUIRED"},

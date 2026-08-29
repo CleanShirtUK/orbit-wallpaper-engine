@@ -234,6 +234,23 @@ Not every shader can work automatically. Audio inputs, texture channels and mult
 
 Manual `.frag` files can be placed in the user shader directory regardless of whether they appear in the online catalogue.
 
+## Multi-monitor scaling
+
+`ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS=1` treats enabled outputs as regions of
+one virtual desktop canvas. It is enabled by default and can be changed in the
+Wallpaper Settings application as **Scale between multiple monitors**. Set it
+to `0` to render each output independently.
+
+For Shadertoy-style shaders using `mainImage`, Orbit supplies the local output
+resolution, virtual desktop resolution, output origin, and mode flag through
+the `u_orbit_*` uniforms. When the option is enabled, Orbit also passes the
+virtual-canvas `iResolution` and translated `fragCoord` to `mainImage`. This
+keeps monitor topology out of shader code while preserving local rendering when
+the option is disabled.
+
+See `MULTI_MONITOR.md` for the coordinate model and the compatibility audit of
+the installed shader collection.
+
 ## Shader browser and attribution
 
 The optional shader browser uses the catalogue maintained by **KDE Shader Wallpaper**:

@@ -432,6 +432,7 @@ Item {
 
         property var shaderFiles: ["wave.frag (default)"]
         property string selectedShader: ""
+        property bool shaderSelectionDirty: false
         property real introDuration: 4.5
         property real exitDuration: 1.0
         property real introPeakSpeed: 34.0
@@ -440,6 +441,7 @@ Item {
         property real introRevealEnd: 0.22
         property real introDecay: 10.0
         property real paletteStrength: 0.72
+        property bool scaleBetweenMonitors: true
         property real peakBrightness: 1.0
 
         function brightnessToSlider(value) {
@@ -513,6 +515,7 @@ Item {
             introRevealEnd = numberValue("ORBIT_WALLPAPER_INTRO_REVEAL_END", 0.22)
             introDecay = numberValue("ORBIT_WALLPAPER_INTRO_DECAY", 10.0)
             paletteStrength = numberValue("ORBIT_WALLPAPER_PALETTE_STRENGTH", 0.72)
+            scaleBetweenMonitors = boolValue("ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS", true)
             peakBrightness = numberValue("ORBIT_WALLPAPER_PEAK_BRIGHTNESS", 1.0)
             targetFps = numberValue("ORBIT_WALLPAPER_TARGET_FPS", 60.0)
             renderScale = numberValue("ORBIT_WALLPAPER_RENDER_SCALE", 1.0)
@@ -521,6 +524,7 @@ Item {
             gpuPressureEnter = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", 75.0)
             gpuPressureExit = numberValue("ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", 45.0)
             selectedShader = value("ORBIT_WALLPAPER_SHADER", "")
+            shaderSelectionDirty = false
             wallpaperRestartRequired = Boolean(payload.restart_required)
             wallpaperDirty = wallpaperRestartRequired
             configLoaded = true
@@ -652,7 +656,7 @@ Item {
             wallpaperRoot.stageSucceeded = false
             wallpaperStatusText = "Saving…"
 
-            saveWallpaperConfig.command = [
+            var command = [
                 root.controlPath, "config", "set",
                 "ORBIT_WALLPAPER_INTRO_DURATION", Number(introDuration).toFixed(3),
                 "ORBIT_WALLPAPER_EXIT_DURATION", Number(exitDuration).toFixed(3),
@@ -662,15 +666,19 @@ Item {
                 "ORBIT_WALLPAPER_INTRO_REVEAL_END", Number(introRevealEnd).toFixed(3),
                 "ORBIT_WALLPAPER_INTRO_DECAY", Number(introDecay).toFixed(3),
                 "ORBIT_WALLPAPER_PALETTE_STRENGTH", Number(paletteStrength).toFixed(3),
+                "ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS", scaleBetweenMonitors ? "1" : "0",
                 "ORBIT_WALLPAPER_PEAK_BRIGHTNESS", Number(peakBrightness).toFixed(3),
                 "ORBIT_WALLPAPER_TARGET_FPS", Number(targetFps).toFixed(1),
                 "ORBIT_WALLPAPER_RENDER_SCALE", Number(renderScale).toFixed(2),
                 "ORBIT_WALLPAPER_SPEED", Number(shaderSpeed).toFixed(2),
                 "ORBIT_WALLPAPER_RESOURCE_GOVERNOR", resourceGovernor ? "1" : "0",
                 "ORBIT_WALLPAPER_GPU_PRESSURE_ENTER", Number(gpuPressureEnter).toFixed(0),
-                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", Number(gpuPressureExit).toFixed(0),
-                "ORBIT_WALLPAPER_SHADER", selectedShader || "wave.frag"
+                "ORBIT_WALLPAPER_GPU_PRESSURE_EXIT", Number(gpuPressureExit).toFixed(0)
             ]
+            // Avoid replaying a stale shader selection when applying another setting.
+            if (shaderSelectionDirty)
+                command.push("ORBIT_WALLPAPER_SHADER", selectedShader || "wave.frag")
+            saveWallpaperConfig.command = command
 
             saveWallpaperConfig.running = true
         }
@@ -826,6 +834,7 @@ Item {
                     return
                 }
                 wallpaperRoot.wallpaperDirty = false
+                wallpaperRoot.shaderSelectionDirty = false
                 wallpaperRoot.wallpaperRestartRequired = false
                 wallpaperRoot.wallpaperStatusText = "Wallpaper settings applied with intro."
                 wallpaperRoot.reloadConfig()
@@ -908,7 +917,7 @@ Item {
 
             Item {
                 width: parent.width
-                height: 130
+                height: 164
 
                 Column {
                     anchors.fill: parent
@@ -934,6 +943,7 @@ Item {
                             currentIndex: wallpaperRoot.shaderIndex()
                             onActivated: {
                                 wallpaperRoot.selectedShader = currentIndex === 0 ? "" : currentText
+                                wallpaperRoot.shaderSelectionDirty = true
                                 wallpaperRoot.markDirty()
                             }
                         }
@@ -1032,6 +1042,24 @@ Item {
 
                     Text {
                         text: "Installed shaders are loaded from ~/.config/orbit-wallpaper-engine/shaders."
+                        color: mutedColor()
+                        font.family: themeData.uiFont
+                        font.pixelSize: 9
+                        width: parent.width
+                        elide: Text.ElideRight
+                    }
+
+                    WallpaperCheckBox {
+                        text: "Scale between multiple monitors"
+                        checked: wallpaperRoot.scaleBetweenMonitors
+                        onToggled: {
+                            wallpaperRoot.scaleBetweenMonitors = checked
+                            wallpaperRoot.markDirty()
+                        }
+                    }
+
+                    Text {
+                        text: "Treat connected displays as one continuous canvas."
                         color: mutedColor()
                         font.family: themeData.uiFont
                         font.pixelSize: 9

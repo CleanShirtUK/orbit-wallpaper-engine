@@ -45,6 +45,32 @@ class ControlApiTests(unittest.TestCase):
         self.assertIn("ORBIT_WALLPAPER_SPEED=1.0", self.config.read_text())
         self.assertTrue(payload["restart_required"])
 
+    def test_scale_between_monitors_accepts_enabled_and_disabled_values(self):
+        enabled = CONTROL.stage_config({"ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS": "1"})
+        self.assertTrue(enabled["ok"])
+        self.assertIn("ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS", enabled["pending_changes"])
+        self.assertEqual(
+            CONTROL.load_json(CONTROL.STATE_PATH, {})["pending"]["ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS"],
+            "1",
+        )
+
+        disabled = CONTROL.stage_config({"ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS": "false"})
+        self.assertTrue(disabled["ok"])
+        self.assertEqual(
+            CONTROL.load_json(CONTROL.STATE_PATH, {})["pending"]["ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS"],
+            "false",
+        )
+
+    def test_scale_between_monitors_rejects_invalid_boolean(self):
+        with self.assertRaises(CONTROL.APIError) as raised:
+            CONTROL.stage_config({"ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS": "maybe"})
+        self.assertEqual(raised.exception.code, "invalid_config")
+
+    def test_scale_between_monitors_is_omitted_without_explicit_config(self):
+        payload = CONTROL.config_get()
+        self.assertNotIn("ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS", payload["settings"])
+        self.assertEqual(CONTROL.CONFIG_SPECS["ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS"]["kind"], "bool")
+
     def test_malformed_config_is_not_overwritten(self):
         original = "ORBIT_WALLPAPER_SPEED=1.0\nmalformed\n"
         self.config.write_text(original)
@@ -156,6 +182,14 @@ class ControlApiTests(unittest.TestCase):
         self.assertIn('String(item.id),\n                    "--intro"', qml)
         self.assertIn("&& !shaderInstallProcess.running", qml)
         self.assertIn("enabled: !shaderInstallProcess.running", qml)
+
+    def test_multi_monitor_setting_qml_uses_canonical_key_and_protects_shader(self):
+        qml = (ROOT / "settings" / "WallpaperSettings.qml").read_text(encoding="utf-8")
+        self.assertIn('text: "Scale between multiple monitors"', qml)
+        self.assertIn('text: "Treat connected displays as one continuous canvas."', qml)
+        self.assertIn('"ORBIT_WALLPAPER_SCALE_BETWEEN_MONITORS", scaleBetweenMonitors ? "1" : "0"', qml)
+        self.assertIn('if (shaderSelectionDirty)', qml)
+        self.assertIn('command.push("ORBIT_WALLPAPER_SHADER"', qml)
 
     def test_inspect_normalizes_helper_payload(self):
         with mock.patch.object(CONTROL, "run_helper", return_value={
